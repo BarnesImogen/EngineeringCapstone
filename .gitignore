@@ -1,0 +1,13 @@
+# Python Virtual Environments
+.venv/
+env/
+__pycache__/
+*.pyc
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/data/
+.venv/
+__pycache__/
+.DS_Store
+
+data/
