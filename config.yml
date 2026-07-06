@@ -1,0 +1,20 @@
+# CDSS Configuration Settings
+
+pipeline:
+  # Options: gemini, openai, anthropic
+  provider: "deepseek"
+  # The specific model variant to execute
+  model_name: "deepseek-v4-flash"
+  temperature: 0.1
+
+evaluation:
+  # Options: gemini, openai, anthropic
+  judge_provider: "gemini"
+  judge_model: "gemini-2.5-flash"
+  judge_temperature: 0.0
+  # Target success threshold defined in methodology
+  success_threshold: 4.0
+  metrics:
+    - "biological_synthesis"
+    - "systematic_reasoning"
+    - "clinical_actionability"
