@@ -28,6 +28,10 @@ with open("config.yml", "r") as file:
 provider = config["pipeline"]["provider"].lower()
 model_to_use = config["pipeline"]["model_name"]
 generation_temp = config["pipeline"]["temperature"]
+input_filename = "data/processed/tcga_discordant_cases.csv"
+output_dir = "data/generation_outputs"
+
+os.makedirs(output_dir, exist_ok=True)
 
 print(f"Loaded configuration: Using {provider.upper()} with model {model_to_use}")
 
@@ -130,23 +134,36 @@ def generate_patient_summary(provider, model_name, temp, patient_id, clinical_da
         print(f"Error generating summary for {patient_id}: {e}")
         return None
 
-# 4. Data Ingestion (Using Dummy Data for Testing)
-dummy_data = {
-    'patient_id': ['TCGA-A1-A0SB', 'TCGA-A2-A0T2'],
-    'clinical_stage': ['Stage IIA', 'Stage IIB'],
-    'oncotype_dx_risk': [1, 1],
-    'pam50_risk': [1, 0],
-    'bci_risk': [0, 0],
-    'mammostrat_risk': [0, 1],
-    'ihc4_risk': [1, 0],
-    'kim10_risk': [0, 1],
-    'irrs7_risk': [1, 1],
-    'hu11_risk': [0, 0],
-    'MKI67_expression': [4.5, 1.2],
-    'ESR1_expression': [2.1, 5.8],
-    'ERBB2_expression': [1.0, 1.1]
-}
-df = pd.DataFrame(dummy_data)
+if not os.path.exists(input_filename):
+    raise FileNotFoundError(
+        f"Could not find {input_filename}. Run src/bioinformatics_pipeline.py first."
+    )
+
+df = pd.read_csv(input_filename)
+if "Unnamed: 0" in df.columns:
+    df = df.rename(columns={"Unnamed: 0": "patient_id"})
+elif "patient_id" not in df.columns:
+    raise ValueError("Could not find a patient identifier column in tcga_discordant_cases.csv")
+
+sig_columns = [
+    ("Oncotype DX", "OncotypeDX_Class"),
+    ("PAM50", "Pam50_Class"),
+    ("BCI", "BCI_Class"),
+    ("Mammostrat", "Mammostrat_Class"),
+    ("IHC4", "IHC4_Class"),
+    ("Kim-10", "Kim10_Class"),
+    ("IRRS-7", "IRRS7_Class"),
+    ("Hu-11", "Hu11_Class"),
+]
+
+transcriptomic_columns = [
+    "MKI67",
+    "ESR1",
+    "ERBB2",
+    "PGR",
+    "AURKA",
+    "BCL2",
+]
 
 results = []
 
@@ -155,24 +172,33 @@ print(f"Initiating CDSS Pipeline using {provider.upper()}...\n")
 for index, row in df.iterrows():
     print(f"Processing Patient: {row['patient_id']}...")
     
-    clinical_meta = f"Stage: {row['clinical_stage']}"
-    
-    sig_classifications = f"""
-    Oncotype DX: {row['oncotype_dx_risk']}
-    PAM50: {row['pam50_risk']}
-    BCI: {row['bci_risk']}
-    Mammostrat: {row['mammostrat_risk']}
-    IHC4: {row['ihc4_risk']}
-    Kim-10: {row['kim10_risk']}
-    IRRS-7: {row['irrs7_risk']}
-    Hu-11: {row['hu11_risk']}
-    """
-    
-    transcriptomics = f"""
-    MKI67: {row['MKI67_expression']}
-    ESR1: {row['ESR1_expression']}
-    ERBB2: {row['ERBB2_expression']}
-    """
+    clinical_fields = [
+        ("years_to_birth", "Age at diagnosis"),
+        ("pathologic_stage", "Pathologic stage"),
+        ("histological_type", "Histological type"),
+        ("ER.Status", "ER status"),
+        ("PR.Status", "PR status"),
+        ("HER2.Status", "HER2 status"),
+        ("overall_survival", "Overall survival"),
+        ("status", "Survival status"),
+    ]
+    clinical_meta = "\n".join(
+        f"{label}: {row[column]}"
+        for column, label in clinical_fields
+        if column in row and pd.notna(row[column])
+    )
+
+    sig_classifications = "\n".join(
+        f"{label}: {row[column]}"
+        for label, column in sig_columns
+        if column in row and pd.notna(row[column])
+    )
+
+    transcriptomics = "\n".join(
+        f"{gene}: {row[gene]}"
+        for gene in transcriptomic_columns
+        if gene in row and pd.notna(row[gene])
+    )
     
     summary = generate_patient_summary(
         provider=provider,
@@ -195,7 +221,7 @@ for index, row in df.iterrows():
 
 results_df = pd.DataFrame(results)
 
-output_filename = f"{provider}_generation_results.csv"
+output_filename = f"{output_dir}/{provider}_generation_results.csv"
 results_df.to_csv(output_filename, index=False)
 
 print(f"\nPipeline execution complete. Generation results saved to: {output_filename}")

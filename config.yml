@@ -2,9 +2,9 @@
 
 pipeline:
   # Options: gemini, openai, anthropic
-  provider: "deepseek"
+  provider: "gemini"
   # The specific model variant to execute
-  model_name: "deepseek-v4-flash"
+  model_name: "gemini-2.5-flash"
   temperature: 0.1
 
 evaluation:

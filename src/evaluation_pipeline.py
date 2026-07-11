@@ -63,7 +63,7 @@ evaluation_config = types.GenerateContentConfig(
     response_schema=GradingReport,
 )
 
-input_filename = "gemini_generation_results.csv"
+input_filename = "data/generation_outputs/gemini_generation_results.csv"
 if not os.path.exists(input_filename):
     raise FileNotFoundError(f"Could not find {input_filename}. Please run the generation script first!")
 
@@ -116,7 +116,7 @@ for index, row in df.iterrows():
     except Exception as e:
         print(f"Error evaluating patient {patient_id}: {e}")
 
-output_filename = "final_evaluated_results.csv"
+output_filename = "data/evaluation_outputs/gemini_evaluated_results.csv"
 final_df = pd.DataFrame(evaluation_results)
 final_df.to_csv(output_filename, index=False)
 
