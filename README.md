@@ -44,7 +44,7 @@ Add the raw TCGA BRCA files to `data/raw/`:
 - `Human__TCGA_BRCA__UNC__RNAseq__HiSeq_RNA__01_28_2016__BI__Gene__Firehose_RSEM_log2.cct`
 
 Retrieve these datasets from this link: https://linkedomics.org/data_download/TCGA-BRCA/ 
-Ensuring that you download the Climical and RNAseq (HiSeq, Gene level) datasets
+Ensure that you download the Clinical and RNAseq (HiSeq, Gene level) datasets.
 
 Create a `.env` file in the project root before using any LLM provider that needs API access. Put the relevant keys in that file, for example:
 
@@ -56,6 +56,50 @@ DEEPSEEK_API_KEY=your_key_here
 ```
 
 If you want to change the model or provider, update `config.yml`. The generation pipeline reads the `pipeline` section, so you can switch providers or model names there. The `.env` file must already exist and contain the matching API key for the provider you choose.
+
+### Windows and R Setup
+
+If you are running the project on Windows, use PowerShell rather than the macOS/Linux activation commands.
+
+Prerequisites:
+
+- Python 3.x
+- R Statistical Software from CRAN, installed in a path such as `C:\Program Files\R\R-4.x.x`
+
+Set up the Python environment in PowerShell:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+If PowerShell blocks script execution, run `Set-ExecutionPolicy Unrestricted -Scope CurrentUser`, confirm with `Y`, and activate the environment again.
+
+The bioinformatics pipeline uses `rpy2` to communicate with R. On Windows, `rpy2` may not find the R installation automatically, so the `R_HOME` and `PATH` variables should be set in the Python file where `rpy2` is first imported, such as `src/classification_calculations.py`:
+
+```python
+import os
+
+r_home = r'C:\Program Files\R\R-4.x.x'
+os.environ['R_HOME'] = r_home
+
+r_dll_path = os.path.join(r_home, 'bin', 'x64')
+os.environ['PATH'] = r_dll_path + ';' + os.environ.get('PATH', '')
+
+import rpy2.robjects as robjects
+```
+
+Do not add `\bin` to the `r_home` path. Keep the `r` prefix so Python reads the Windows backslashes correctly.
+
+Install the required R packages from the R Console, not through `pip`:
+
+```r
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install("genefu")
+```
+
+Once Python, R, and the R packages are installed, the pipeline scripts can run normally.
 
 ## Installation
 
