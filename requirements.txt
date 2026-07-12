@@ -7,3 +7,6 @@ scikit-learn
 rpy2
 jupyter
 python-dotenv
+google-genai
+openai
+anthropic
