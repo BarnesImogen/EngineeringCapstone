@@ -6,3 +6,4 @@ seaborn
 scikit-learn
 rpy2
 jupyter
+python-dotenv
