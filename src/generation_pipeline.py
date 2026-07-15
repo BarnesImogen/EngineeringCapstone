@@ -126,7 +126,22 @@ def generate_patient_summary(provider, model_name, temp, patient_id, clinical_da
                 ]
             )
             return response.choices[0].message.content
-            
+
+        elif provider == "lmstudio":
+            client = openai.OpenAI(
+                api_key="lmstudio", 
+                base_url="http://127.0.0.1:1234/v1" 
+            )
+            response = client.chat.completions.create(
+                model=model_name,
+                temperature=temp,
+                messages=[
+                    {"role": "system", "content": system_instruction},
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            return response.choices[0].message.content 
+        
         else:
             raise ValueError(f"Provider '{provider}' is not supported. Check config.yml.")
 
@@ -169,7 +184,7 @@ results = []
 
 print(f"Initiating CDSS Pipeline using {provider.upper()}...\n")
 
-for index, row in df.iterrows():
+for index, row in df.head(5).iterrows():
     print(f"Processing Patient: {row['patient_id']}...")
     
     clinical_fields = [

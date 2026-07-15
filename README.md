@@ -14,7 +14,7 @@ The bioinformatics pipeline loads TCGA-BRCA clinical and RNA-seq data, calculate
 
 The generation pipeline uses the provider and model defined in `config.yml` to produce a structured clinical summary for each case.
 
-The evaluation pipeline uses Gemini as a judge to score each generated summary across three dimensions: biological synthesis, systematic reasoning, and clinical actionability.
+The evaluation pipeline uses the judge provider defined in `config.yml` to score each generated summary across three dimensions: biological synthesis, systematic reasoning, and clinical actionability.
 
 ## Repository Layout
 
@@ -137,13 +137,13 @@ It also saves a signature correlation heatmap into `data/processed/`.
 
 ### 3. Evaluation Pipeline
 
-`src/evaluation_pipeline.py` reads the generated summaries and grades them with Gemini. The final scored results are written to `data/evaluation_outputs/gemini_evaluated_results.csv`.
+`src/evaluation_pipeline.py` reads the generated summaries and grades them with the judge provider from `config.yml`. When `judge_provider` is set to `lmstudio`, the results are written to `data/evaluation_outputs/lmstudio_evaluated_results.csv`.
 
 ## Configuration Notes
 
 - `config.yml` controls the active provider, model name, and temperature settings.
 - If you change the provider in `config.yml`, make sure the matching API key is present in `.env`.
-- The evaluation script currently expects Gemini output in `data/generation_outputs/gemini_generation_results.csv`.
+- The evaluation script reads the generation output matching the configured pipeline provider, such as `data/generation_outputs/lmstudio_generation_results.csv`.
 
 ## Outputs
 
