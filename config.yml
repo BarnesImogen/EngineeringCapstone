@@ -1,16 +1,16 @@
 # CDSS Configuration Settings
 
 pipeline:
-  # Options: gemini, openai, anthropic
-  provider: "gemini"
+  # Options: gemini, openai, anthropic, lmstudio
+  provider: "lmstudio"
   # The specific model variant to execute
-  model_name: "gemini-2.5-flash"
+  model_name: "local-model"
   temperature: 0.1
 
 evaluation:
-  # Options: gemini, openai, anthropic
-  judge_provider: "gemini"
-  judge_model: "gemini-2.5-flash"
+  # Options: gemini, openai, anthropic, lmstudio
+  judge_provider: "lmstudio"
+  judge_model: "local-model"
   judge_temperature: 0.0
   # Target success threshold defined in methodology
   success_threshold: 4.0
