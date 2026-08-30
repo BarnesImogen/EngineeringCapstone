@@ -63,15 +63,22 @@ evaluator_instruction = inspect.cleandoc("""
     Your role is to audit and evaluate AI summaries generated to resolve discordant multi-gene prognostic risk signatures.
 
     You will be provided with:
-    1. The VERIFIED ACTIVE PATHWAYS given to the AI during generation (Reference Facts).
+    1. The FULL CONTEXT given to the AI during generation (Clinical Metadata, Algorithmic Risk Classifications,
+       Transcriptomic Profile, and Verified Active Pathways) — this is everything the AI actually saw.
     2. The AI'S GENERATED OUTPUT.
+
+    IMPORTANT: The AI is permitted to reason about ANY gene or value that appears in the FULL CONTEXT, not only the
+    genes listed under Verified Active Pathways. A gene mentioned with its correct, given expression value from the
+    Transcriptomic Profile is grounded, not hallucinated, even if that gene did not trigger a Verified Active Pathway
+    entry. Only flag hallucination for genes, pathways, expression values, or signature-specific claims (e.g. "BCI
+    weights ER and HER2") that do NOT appear anywhere in the provided FULL CONTEXT.
 
     Evaluate the generated summary across three distinct domains using a 1 to 5 scale:
 
     1. Biological Synthesis (Grounding & Anti-Hallucination):
-       - Score 1: Hallucinates biological mechanisms, introduces unverified genes, or contradicts provided reference pathways.
-       - Score 3: Broad or generic descriptions; loosely grounded in the reference pathways but lacks precision.
-       - Score 5: Flawless synthesis. Exclusively and accurately integrates the provided reference pathways without introducing external claims.
+       - Score 1: Hallucinates biological mechanisms, introduces genes/values not present anywhere in the FULL CONTEXT, or contradicts it.
+       - Score 3: Broad or generic descriptions; loosely grounded in the provided context but lacks precision.
+       - Score 5: Flawless synthesis. Exclusively and accurately integrates the provided context without introducing external claims.
 
     2. Systematic Reasoning (Mechanistic Root-Cause Analysis):
        - Score 1: Fails to explain why algorithmic signatures disagree or makes contradictory logical leaps.
@@ -84,8 +91,8 @@ evaluator_instruction = inspect.cleandoc("""
        - Score 5: Delivers a definitive, well-justified prognostic consensus (e.g., High Risk vs. Low Risk) that logically flows from the interpreted data.
 
     SCORING PRINCIPLES:
-    - Cross-reference the AI output directly against the provided Verified Pathways.
-    - Deduct marks immediately for hallucinated genes, invented mechanisms, or unjustified leaps.
+    - Cross-reference the AI output directly against the provided FULL CONTEXT (not only the Verified Active Pathways).
+    - Deduct marks immediately for genes, values, mechanisms, or signature-weighting claims that appear nowhere in the FULL CONTEXT.
     - Award 4 or 5 only to outputs demonstrating strong mechanistic rigor and clear resolution logic.
 """)
 
@@ -103,6 +110,9 @@ print("Initiating Local LLM-as-a-Judge Evaluation Pipeline...\n")
 for index, row in df.iterrows():
     patient_id = row['patient_id']
     generated_text = row.get(generation_input_column)
+    clinical_data = row.get('clinical_data', '* Not available in log.')
+    signature_classifications = row.get('signature_classifications', '* Not available in log.')
+    transcriptomic_data = row.get('transcriptomic_data', '* Not available in log.')
     active_pathways = row.get('active_pathways', '* Reference pathways not available in log.')
     
     print(f"Auditing Report for Patient: {patient_id}...")
@@ -112,9 +122,20 @@ for index, row in df.iterrows():
         continue
 
     prompt = inspect.cleandoc(f"""
-        Please audit and score the following generated Bioinformatics summary:
+        Please audit and score the following generated Bioinformatics summary.
 
-        --- VERIFIED ACTIVE PATHWAYS (GROUND TRUTH REFERENCE CONTEXT) ---
+        --- FULL CONTEXT PROVIDED TO THE AI DURING GENERATION ---
+
+        Clinical Metadata:
+        {clinical_data}
+
+        Conflicting Algorithmic Risk Classifications (1 = High Risk, 0 = Low Risk):
+        {signature_classifications}
+
+        Transcriptomic Profile (Key Biomarkers & Expression Levels):
+        {transcriptomic_data}
+
+        Verified Active Biological Pathways (Rule-Based RAG Extraction):
         {active_pathways}
 
         --- START OF AI OUTPUT ---
@@ -122,6 +143,8 @@ for index, row in df.iterrows():
         --- END OF AI OUTPUT ---
 
         Audit the output against the 3 domains (Biological Synthesis, Systematic Reasoning, Prognostic Resolution).
+        Remember: any gene or value from the Transcriptomic Profile above is legitimate grounding, even if it is not
+        repeated in the Verified Active Pathways section.
         Return the integer scores (1-5) and explicit justifications strictly matching the requested JSON schema.
     """)
 
@@ -140,6 +163,9 @@ for index, row in df.iterrows():
         
         evaluation_results.append({
             'patient_id': patient_id,
+            'clinical_data': clinical_data,
+            'signature_classifications': signature_classifications,
+            'transcriptomic_data': transcriptomic_data,
             'active_pathways': active_pathways,
             generation_input_column: generated_text,
             'bio_synthesis_score': parsed_report.biological_synthesis_score,

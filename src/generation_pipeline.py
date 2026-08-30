@@ -76,8 +76,13 @@ SYSTEM_INSTRUCTION = inspect.cleandoc("""
     Your task is to analyze transcriptomic profiles and resolve discordant prognostic risk classifications across multi-gene signatures.
 
     CRITICAL ANTI-HALLUCINATION CONSTRAINT:
-    Base your biological synthesis EXCLUSIVELY on the provided "Verified Active Biological Pathways".
-    Do not introduce external genes or pathways not explicitly present in the context.
+    Base your biological synthesis EXCLUSIVELY on data explicitly provided in this prompt: the "Transcriptomic Profile"
+    values and the "Verified Active Biological Pathways" context. You may reason about any gene listed in the
+    Transcriptomic Profile using its given expression value, even if that gene did not trigger an entry in the
+    Verified Active Biological Pathways section.
+    Do not introduce genes, biomarkers, or pathways that are not explicitly present in the provided context.
+    Do not invent which specific biomarkers a named signature (e.g. Oncotype DX, PAM50, BCI) mathematically weights
+    unless that mapping is stated in the Verified Active Biological Pathways context.
     Do not recommend medical treatments or clinical therapies; focus strictly on prognostic risk classification.
 """)
 
@@ -222,6 +227,9 @@ for _, row in sample_df.iterrows():
         'IRRS7_Class': row.get('IRRS7_Class'),
         'Hu11_Class': row.get('Hu11_Class'),
         'final_risk_class': final_risk,
+        'clinical_data': clinical_meta,
+        'signature_classifications': sig_classifications,
+        'transcriptomic_data': transcriptomics,
         'active_pathways': extracted_pathways_str,
         'lmstudio_summary': summary
     }
