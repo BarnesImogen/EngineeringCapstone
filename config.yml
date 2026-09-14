@@ -5,6 +5,8 @@ pipeline:
   provider: "lmstudio"
   # The specific model variant to execute
   model_name: "local-model"
+  base_url: "http://127.0.0.1:1234/v1"
+  api_key: "lmstudio"
   temperature: 0.1
 
 evaluation:
@@ -12,6 +14,8 @@ evaluation:
   judge_provider: "lmstudio"
   judge_model: "local-model"
   judge_temperature: 0.0
+  base_url: "http://127.0.0.1:1234/v1"
+  api_key: "lmstudio"
   # Target success threshold defined in methodology
   success_threshold: 4.0
   metrics:

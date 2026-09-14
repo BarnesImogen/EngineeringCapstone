@@ -6,6 +6,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel, Field
+import math
 
 load_dotenv()
 
@@ -21,17 +22,19 @@ with open(CONFIG_PATH, "r") as file:
 
 model_to_use = config["pipeline"]["model_name"]
 generation_temp = float(config["pipeline"].get("temperature", 0.2))
+api_base = config["pipeline"].get("base_url", "http://127.0.0.1:1234/v1")
+api_key = config["pipeline"].get("api_key", "lmstudio")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 print(f"Loaded configuration: Local LM Studio targeting model '{model_to_use}'")
 
 # ==========================================
-# 2. LM Studio Client Initialization
+# 2. LM Studio Client Initialisation
 # ==========================================
-client = OpenAI(base_url="http://127.0.0.1:1234/v1", api_key="lmstudio")
+client = OpenAI(base_url=api_base, api_key=api_key)
 
 # ==========================================
-# 3. Multi-Axis RAG Knowledge Base (Expanded for all 8 Signatures)
+# 3. Multi-Axis RAG Knowledge Base 
 # ==========================================
 ONCOLOGY_PATHWAYS = {
     "Cellular Proliferation & Mitotic Progression": {
@@ -138,13 +141,30 @@ def generate_patient_summary(patient_id, clinical_data, signature_classification
                 {"role": "system", "content": SYSTEM_INSTRUCTION},
                 {"role": "user", "content": prompt}
             ],
-            response_format={"type": "json_schema", "json_schema": arbitration_schema}
+            response_format={"type": "json_schema", "json_schema": arbitration_schema},
+            logprobs=True
         )
         parsed_result = ArbitrationResult.model_validate_json(response.choices[0].message.content)
-        return parsed_result.final_risk_class, parsed_result.arbitration_summary
+
+        logprob_data = response.choices[0].logprobs.content
+        total_entropy = 0
+        total_prob = 0
+        token_count = len(logprob_data)
+
+        for token in logprob_data:
+            lp = token.logprob 
+            prob = math.exp(lp) 
+            
+            total_prob += prob
+            total_entropy -= prob * lp 
+
+        mean_confidence = round((total_prob / token_count) * 100, 2) if token_count > 0 else 0
+        mean_entropy = round(total_entropy / token_count, 4) if token_count > 0 else 0
+
+        return parsed_result.final_risk_class, parsed_result.arbitration_summary, mean_confidence, mean_entropy
     except Exception as e:
         print(f"  [ERROR] Generating summary for {patient_id}: {e}")
-        return "Error", f"Error: {e}"
+        return "Error", f"Error: {e}", 0.0, 0.0
 
 # ==========================================
 # 6. Data Ingestion & Batch Execution
@@ -157,7 +177,6 @@ df = pd.read_csv(INPUT_FILENAME, low_memory=False)
 if "Unnamed: 0" in df.columns:
     df = df.rename(columns={"Unnamed: 0": "patient_id"})
 
-# All 8 Algorithmic Signatures from your Preprocessing Pipeline
 sig_columns = [
     ("Oncotype DX", "OncotypeDX_Class"),
     ("PAM50", "Pam50_Class"),
@@ -169,7 +188,6 @@ sig_columns = [
     ("Hu-11", "Hu11_Class")
 ]
 
-# Key biomarkers spanning the 8 signatures
 transcriptomic_columns = [
     "MKI67", "ESR1", "ERBB2", "PGR", "AURKA", "BCL2",
     "TP53", "HOXB13", "IL17RB", "PGK1", "CCL2", "GADD45B"
@@ -207,7 +225,7 @@ for _, row in sample_df.iterrows():
 
     extracted_pathways_str = "\n".join(active_contexts) if active_contexts else "* No uniquely upregulated pathways identified."
 
-    final_risk, summary = generate_patient_summary(
+    final_risk, summary, confidence, entropy = generate_patient_summary(
         patient_id=p_id,
         clinical_data=clinical_meta,
         signature_classifications=sig_classifications,
@@ -215,7 +233,6 @@ for _, row in sample_df.iterrows():
         active_pathways=extracted_pathways_str
     )
 
-    # Log all 8 initial signature classes alongside the AI's final resolved risk
     record = {
         'patient_id': p_id,
         'OncotypeDX_Class': row.get('OncotypeDX_Class'),
@@ -227,6 +244,8 @@ for _, row in sample_df.iterrows():
         'IRRS7_Class': row.get('IRRS7_Class'),
         'Hu11_Class': row.get('Hu11_Class'),
         'final_risk_class': final_risk,
+        'model_confidence_percent': confidence,
+        'model_entropy_score': entropy,
         'clinical_data': clinical_meta,
         'signature_classifications': sig_classifications,
         'transcriptomic_data': transcriptomics,

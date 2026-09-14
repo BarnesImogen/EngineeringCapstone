@@ -11,3 +11,6 @@ google
 google-genai
 openai
 anthropic
+ragas
+langchain-openai
+datasets
