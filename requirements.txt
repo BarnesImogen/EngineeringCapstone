@@ -13,4 +13,5 @@ openai
 anthropic
 ragas
 langchain-openai
+langchain-community
 datasets

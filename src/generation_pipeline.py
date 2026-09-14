@@ -75,8 +75,8 @@ ONCOLOGY_PATHWAYS = {
 }
 
 SYSTEM_INSTRUCTION = inspect.cleandoc("""
-    You are an advanced bioinformatics AI specializing in genomic oncology.
-    Your task is to analyze transcriptomic profiles and resolve discordant prognostic risk classifications across multi-gene signatures.
+    You are an advanced bioinformatics AI specialising in genomic oncology.
+    Your task is to analyse transcriptomic profiles and resolve discordant prognostic risk classifications across multi-gene signatures.
 
     CRITICAL ANTI-HALLUCINATION CONSTRAINT:
     Base your biological synthesis EXCLUSIVELY on data explicitly provided in this prompt: the "Transcriptomic Profile"
@@ -134,34 +134,57 @@ def generate_patient_summary(patient_id, clinical_data, signature_classification
     """)
 
     try:
-        response = client.chat.completions.create(
+        # STEP 1: Generate the reasoning and capture the logprobs (Entropy)
+        reasoning_response = client.chat.completions.create(
             model=model_to_use,
             temperature=generation_temp,
             messages=[
                 {"role": "system", "content": SYSTEM_INSTRUCTION},
                 {"role": "user", "content": prompt}
             ],
-            response_format={"type": "json_schema", "json_schema": arbitration_schema},
-            logprobs=True
+            logprobs=True,
+            top_logprobs=1 # Forces the LM Studio backend to process the calculations
         )
-        parsed_result = ArbitrationResult.model_validate_json(response.choices[0].message.content)
-
-        logprob_data = response.choices[0].logprobs.content
+        
+        raw_summary = reasoning_response.choices[0].message.content
+        
+        # Calculate the Entropy and Confidence Safely
         total_entropy = 0
         total_prob = 0
-        token_count = len(logprob_data)
+        token_count = 0
 
-        for token in logprob_data:
-            lp = token.logprob 
-            prob = math.exp(lp) 
+        # Safety check: Only process logprobs if the server actually returned them
+        if reasoning_response.choices[0].logprobs and reasoning_response.choices[0].logprobs.content:
+            logprob_data = reasoning_response.choices[0].logprobs.content
+            token_count = len(logprob_data)
             
-            total_prob += prob
-            total_entropy -= prob * lp 
+            for token in logprob_data:
+                lp = token.logprob 
+                prob = math.exp(lp) 
+                
+                total_prob += prob
+                total_entropy -= prob * lp 
 
         mean_confidence = round((total_prob / token_count) * 100, 2) if token_count > 0 else 0
         mean_entropy = round(total_entropy / token_count, 4) if token_count > 0 else 0
 
+        # STEP 2: Force the JSON structure using your preferred API schema
+        format_prompt = f"Extract the final risk class and the arbitration summary from the following text:\n\n{raw_summary}"
+        
+        formatting_response = client.chat.completions.create(
+            model=model_to_use,
+            temperature=0.0,
+            messages=[
+                {"role": "system", "content": "You are a strict data extraction assistant."},
+                {"role": "user", "content": format_prompt}
+            ],
+            response_format={"type": "json_schema", "json_schema": arbitration_schema}
+        )
+        
+        parsed_result = ArbitrationResult.model_validate_json(formatting_response.choices[0].message.content)
+
         return parsed_result.final_risk_class, parsed_result.arbitration_summary, mean_confidence, mean_entropy
+        
     except Exception as e:
         print(f"  [ERROR] Generating summary for {patient_id}: {e}")
         return "Error", f"Error: {e}", 0.0, 0.0

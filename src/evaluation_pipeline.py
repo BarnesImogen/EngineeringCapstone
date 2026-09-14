@@ -5,13 +5,6 @@ import pandas as pd
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-# Ragas & LangChain Imports
-from datasets import Dataset
-from langchain_openai import ChatOpenAI
-from ragas.llms import LangchainLLMWrapper
-from ragas.metrics import faithfulness
-from ragas import evaluate
-
 # ==========================================
 # 1. Load Configuration & Paths
 # ==========================================
@@ -31,18 +24,9 @@ os.makedirs("data/evaluation_outputs", exist_ok=True)
 print(f"Loaded configuration: Local LM Studio targeting judge model '{model_to_use}'")
 
 # ==========================================
-# 2. LM Studio Client Initialisation (Standard & Ragas)
+# 2. LM Studio Client Initialisation
 # ==========================================
 client = OpenAI(base_url=eval_base_url, api_key=eval_api_key)
-
-ragas_chat_model = ChatOpenAI(
-    base_url=eval_base_url,
-    api_key=eval_api_key,
-    model=model_to_use,
-    temperature=generation_temp,
-)
-ragas_local_llm = LangchainLLMWrapper(ragas_chat_model)
-faithfulness.llm = ragas_local_llm
 
 # ==========================================
 # 3. Structured Pydantic Schema
@@ -65,7 +49,7 @@ grading_report_schema = {
 # 4. Evidence-Based Auditor System Prompt
 # ==========================================
 evaluator_instruction = inspect.cleandoc("""
-    You are an expert, independent academic auditor specializing in precision oncology and bioinformatics.
+    You are an expert, independent academic auditor specialising in precision oncology and bioinformatics.
     Your role is to audit and evaluate AI summaries generated to resolve discordant multi-gene prognostic risk signatures.
 
     You will be provided with:
@@ -98,7 +82,7 @@ evaluator_instruction = inspect.cleandoc("""
     SCORING PRINCIPLES:
     * Cross-reference the AI output directly against the provided FULL CONTEXT (not only the Verified Active Pathways).
     * Deduct marks immediately for genes, values, mechanisms, or signature-weighting claims that appear nowhere in the FULL CONTEXT.
-    * Award 4 or 5 only to outputs demonstrating strong mechanistic rigor and clear resolution logic.
+    * Award 4 or 5 only to outputs demonstrating strong mechanistic rigour and clear resolution logic.
 """)
 
 # ==========================================
@@ -110,8 +94,6 @@ if not os.path.exists(input_filename):
 df = pd.read_csv(input_filename)
 evaluation_results = []
 
-ragas_data = {"question": [], "answer": [], "contexts": []}
-
 print("Initiating Local LLM-as-a-Judge Evaluation Pipeline...\n")
 
 for index, row in df.iterrows():
@@ -121,11 +103,6 @@ for index, row in df.iterrows():
     signature_classifications = row.get('signature_classifications', '* Not available in log.')
     transcriptomic_data = row.get('transcriptomic_data', '* Not available in log.')
     active_pathways = row.get('active_pathways', '* Reference pathways not available in log.')
-    
-    ragas_data["question"].append(f"Resolve prognostic discordance for patient {patient_id}.")
-    ragas_data["answer"].append(str(generated_text))
-    full_context_str = f"Pathways:\n{active_pathways}\n\nClinical Data:\n{clinical_data}\n\nTranscriptomic Profile:\n{transcriptomic_data}"
-    ragas_data["contexts"].append([full_context_str])
 
     print(f"Auditing Report for Patient: {patient_id}...")
     
@@ -186,26 +163,15 @@ for index, row in df.iterrows():
         print(f"  [ERROR] Evaluating patient {patient_id}: {e}")
 
 # ==========================================
-# 6. Execution Phase (Ragas Faithfulness)
+# 6. Save Structured Audit Outputs
 # ==========================================
-print("\nInitiating Ragas Faithfulness Evaluation...")
-ragas_dataset = Dataset.from_dict(ragas_data)
-ragas_results = evaluate(dataset=ragas_dataset, metrics=[faithfulness])
-ragas_df = ragas_results.to_pandas()
-
 final_df = pd.DataFrame(evaluation_results)
-final_df['ragas_faithfulness_score'] = ragas_df['faithfulness']
-
-# ==========================================
-# 7. Save Outputs & Metrics
-# ==========================================
 final_df.to_csv(output_filename, index=False)
-print(f"\nEvaluation pipeline complete. Matrix scores stored successfully in: {output_filename}")
+print(f"\nStructural evaluation complete. Results stored successfully in: {output_filename}")
 
 if not final_df.empty:
-    print("\n--- Current Performance Metrics ---")
+    print("\n--- Structured Audit Metrics ---")
     print(f"Mean Generation Confidence:    {final_df['model_confidence_percent'].mean():.2f}%")
-    print(f"Mean Ragas Faithfulness:       {final_df['ragas_faithfulness_score'].mean():.2f} / 1.0")
     print(f"Mean Biological Synthesis:     {final_df['bio_synthesis_score'].mean():.2f} / 5.0")
     print(f"Mean Systematic Reasoning:     {final_df['sys_reasoning_score'].mean():.2f} / 5.0")
     print(f"Mean Prognostic Resolution:    {final_df['prognostic_resolution_score'].mean():.2f} / 5.0")
