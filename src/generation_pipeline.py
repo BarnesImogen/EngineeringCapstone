@@ -39,7 +39,7 @@ def load_reactome_pathway_index(gmt_path="data/raw/ReactomePathways.gmt"):
     pathway_dict = {}
     if not os.path.exists(gmt_path):
         print(f"\n[WARNING] Reactome mapping file not found at {gmt_path}.")
-        print("Please download 'ReactomePathways.gmt' and place it in 'data/raw/'.")
+        print("Please ensure 'ReactomePathways.gmt' is placed in 'data/raw/'.")
         return pathway_dict
         
     with open(gmt_path, "r") as f:
@@ -135,13 +135,19 @@ def generate_patient_summary(patient_id, clinical_data, signature_classification
         --- Verified Active Biological Pathways (Reactome Database Extraction) ---
         {active_pathways}
         
-        REQUIRED ARBITRATION STEPS (to write inside arbitration_summary):
+        REQUIRED ARBITRATION STEPS:
         1. Conflict Diagnosis: Explicitly state WHICH algorithms are conflicting.
         2. Mechanistic Root Cause: Using the provided pathways, explain EXACTLY why the algorithms disagreed based on how they mathematically weight different biomarkers.
-        3. Prognostic Resolution: Deliver a final, tie-breaking risk classification (High Risk vs. Low Risk) based on the biological evidence provided.
+        3. Prognostic Resolution: Deliver a final, tie-breaking risk classification based on the biological evidence provided.
+        
+        IMPORTANT: Conclude your text with this exact phrase:
+        FINAL RESOLUTION: High Risk
+        or
+        FINAL RESOLUTION: Low Risk
     """)
 
     try:
+        # Step 1: Generate reasoning and extract logprobs
         reasoning_response = client.chat.completions.create(
             model=model_to_use,
             temperature=generation_temp,
@@ -155,24 +161,40 @@ def generate_patient_summary(patient_id, clinical_data, signature_classification
         
         raw_summary = reasoning_response.choices[0].message.content
         
-        total_entropy = 0
-        total_prob = 0
+        total_entropy = 0.0
+        total_prob = 0.0
         token_count = 0
+        min_token_prob = 1.0
+        weakest_token = ""
+        decision_token_confidence = 0.0
 
         if reasoning_response.choices[0].logprobs and reasoning_response.choices[0].logprobs.content:
             logprob_data = reasoning_response.choices[0].logprobs.content
             token_count = len(logprob_data)
             
-            for token in logprob_data:
-                lp = token.logprob 
-                prob = math.exp(lp) 
+            for token_obj in logprob_data:
+                lp = token_obj.logprob 
+                prob = math.exp(lp)
                 
                 total_prob += prob
-                total_entropy -= prob * lp 
+                total_entropy -= prob * lp
+                
+                if prob < min_token_prob:
+                    min_token_prob = prob
+                    weakest_token = token_obj.token.strip()
 
-        mean_confidence = round((total_prob / token_count) * 100, 2) if token_count > 0 else 0
-        mean_entropy = round(total_entropy / token_count, 4) if token_count > 0 else 0
+            # Locate the specific token for the final decision by scanning backwards
+            for token_obj in reversed(logprob_data):
+                clean_t = token_obj.token.strip().lower()
+                if clean_t in ["high", "low"]:
+                    decision_token_confidence = round(math.exp(token_obj.logprob) * 100, 2)
+                    break
 
+        mean_confidence = round((total_prob / token_count) * 100, 2) if token_count > 0 else 0.0
+        mean_entropy = round(total_entropy / token_count, 4) if token_count > 0 else 0.0
+        min_confidence = round(min_token_prob * 100, 2) if token_count > 0 else 0.0
+
+        # Step 2: Enforce strict JSON schema
         format_prompt = f"Extract the final risk class and the arbitration summary from the following text:\n\n{raw_summary}"
         
         formatting_response = client.chat.completions.create(
@@ -187,11 +209,19 @@ def generate_patient_summary(patient_id, clinical_data, signature_classification
         
         parsed_result = ArbitrationResult.model_validate_json(formatting_response.choices[0].message.content)
 
-        return parsed_result.final_risk_class, parsed_result.arbitration_summary, mean_confidence, mean_entropy
+        return (
+            parsed_result.final_risk_class,
+            parsed_result.arbitration_summary,
+            mean_confidence,
+            mean_entropy,
+            decision_token_confidence,
+            min_confidence,
+            weakest_token
+        )
         
     except Exception as e:
         print(f"  [ERROR] Generating summary for {patient_id}: {e}")
-        return "Error", f"Error: {e}", 0.0, 0.0
+        return "Error", f"Error: {e}", 0.0, 0.0, 0.0, 0.0, ""
 
 # ==========================================
 # 6. Data Ingestion & Batch Execution
@@ -249,7 +279,7 @@ def process_cohort(input_filename, output_filename):
     gene_medians = df[available_tx_cols].median()
 
     results = []
-    # Set to sample_df = df when ready to process the entire cohort
+    # Set to sample_df = df to run the entire cohort
     sample_df = df.head(6)
 
     print(f"\nProcessing cohort from {input_filename} ({len(sample_df)} cases to process)...")
@@ -268,10 +298,12 @@ def process_cohort(input_filename, output_filename):
         # Get Reactome pathways for the upregulated genes
         extracted_pathways_str = get_reactome_active_pathways(upregulated_genes, REACTOME_INDEX)
 
-        final_risk, summary, confidence, entropy = generate_patient_summary(
-            patient_id=p_id, clinical_data=clinical_meta,
+        final_risk, summary, confidence, entropy, decision_conf, min_conf, weak_tok = generate_patient_summary(
+            patient_id=p_id,
+            clinical_data=clinical_meta,
             signature_classifications=sig_classifications,
-            transcriptomic_data=transcriptomics, active_pathways=extracted_pathways_str
+            transcriptomic_data=transcriptomics,
+            active_pathways=extracted_pathways_str
         )
 
         record = row.to_dict()
@@ -279,6 +311,9 @@ def process_cohort(input_filename, output_filename):
             'final_risk_class': final_risk,
             'model_confidence_percent': confidence,
             'model_entropy_score': entropy,
+            'decision_token_confidence': decision_conf,
+            'min_token_confidence': min_conf,
+            'weakest_token': weak_tok,
             'clinical_data': clinical_meta,
             'signature_classifications': sig_classifications,
             'transcriptomic_data': transcriptomics,
