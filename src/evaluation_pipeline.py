@@ -17,8 +17,8 @@ eval_base_url = config["evaluation"].get("base_url", "http://127.0.0.1:1234/v1")
 eval_api_key = config["evaluation"].get("api_key", "lmstudio")
 
 generation_input_column = "lmstudio_summary"
-input_filename = "data/generation_outputs/lmstudio_generation_results.csv"
-output_filename = "data/evaluation_outputs/lmstudio_evaluated_results.csv"
+input_filename = "data/generation_outputs/discordant_results.csv"
+output_filename = "data/evaluation_outputs/discordant_evaluated.csv"
 
 os.makedirs("data/evaluation_outputs", exist_ok=True)
 print(f"Loaded configuration: Local LM Studio targeting judge model '{model_to_use}'")

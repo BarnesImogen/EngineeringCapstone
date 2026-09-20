@@ -7,8 +7,6 @@ from scipy.stats import spearmanr
 
 
 # Oncotype DX, ✅
-# Mammaprint, ~ looking into. proving difficult XX
-# Endopredict, XX
 # PAM50 ✅
 # Breast Cancer Index (BCI), ✅
 # Mammostrat ✅
