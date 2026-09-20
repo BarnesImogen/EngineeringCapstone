@@ -1,24 +1,33 @@
 # CDSS Configuration Settings
+#
+# Both stages talk to any OpenAI-compatible endpoint (LM Studio, OpenAI, vLLM, ...).
+# To use a hosted service, change base_url/model and set the key in .env via
+# GENERATION_API_KEY / JUDGE_API_KEY (environment variables override api_key below).
+# Keep the judge model DIFFERENT from the generation model to avoid self-preference bias.
+
+bioinformatics:
+  # Fraction of each signature's score distribution treated as "clearly high" (top) / "clearly low" (bottom).
+  # A patient is discordant only if some signature is clearly high and another clearly low.
+  # 0.3333 = tertiles, 0.2 = top/bottom quintile; 0.5 reproduces the plain median-split definition.
+  discordance_margin: 0.2
 
 pipeline:
-  # Options: gemini, openai, anthropic, lmstudio
-  provider: "lmstudio"
-  # The specific model variant to execute
   model_name: "local-model"
   base_url: "http://127.0.0.1:1234/v1"
   api_key: "lmstudio"
   temperature: 0.1
 
 evaluation:
-  # Options: gemini, openai, anthropic, lmstudio
-  judge_provider: "lmstudio"
-  judge_model: "local-model"
+  judge_model: "local-judge-model"
   judge_temperature: 0.0
   base_url: "http://127.0.0.1:1234/v1"
   api_key: "lmstudio"
-  # Target success threshold defined in methodology
+  # Minimum agreement with the unanimous consensus on concordant cases for a model to pass the sanity check
+  min_concordant_agreement: 0.8
+  # A summary passes a metric when its score is >= this threshold
   success_threshold: 4.0
+  # Must match the score columns produced by evaluation_pipeline.py
   metrics:
     - "biological_synthesis"
     - "systematic_reasoning"
-    - "clinical_actionability"
+    - "prognostic_resolution"

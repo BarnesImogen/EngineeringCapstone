@@ -1,5 +1,6 @@
 import os
 import sys
+import yaml
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -54,6 +55,15 @@ def generate_correlation_heatmap(df, signatures, output_dir):
     print(f"Heatmap saved to {heatmap_path}")
     plt.show()
 
+def load_discordance_margin(config_path="config.yml"):
+    """Fraction (0-0.5] of each signature's tails counted as clearly high/low; 0.5 reproduces the median split."""
+    with open(config_path, "r") as file:
+        config = yaml.safe_load(file)
+    margin = float(config.get("bioinformatics", {}).get("discordance_margin", 1 / 3))
+    if not 0 < margin <= 0.5:
+        raise ValueError(f"discordance_margin must be in (0, 0.5], got {margin}")
+    return margin
+
 def run_pipeline():    
     rna_file = "data/raw/Human__TCGA_BRCA__UNC__RNAseq__HiSeq_RNA__01_28_2016__BI__Gene__Firehose_RSEM_log2.cct" 
     clinical_file = "data/raw/Human__TCGA_BRCA__MS__Clinical__Clinical__01_28_2016__BI__Clinical__Firehose.tsi"
@@ -84,9 +94,23 @@ def run_pipeline():
     master_df['Hu11_Score'] = calculate_hu11_irg_score(master_df)
 
     # Stratify into Binary Classes
-    print("\nStratifying Patients (Median Split)...")
     signatures = ['OncotypeDX', 'Pam50', 'BCI', 'Mammostrat', 'IHC4', 'Kim10', 'IRRS7', 'Hu11']
-    
+
+    # A NaN score would otherwise compare False against the median and be labelled Low Risk,
+    # so drop patients without a complete set of scores.
+    score_cols = [f'{sig}_Score' for sig in signatures]
+    master_df[score_cols] = master_df[score_cols].apply(pd.to_numeric, errors='coerce')
+    n_before = len(master_df)
+    missing_counts = master_df[score_cols].isna().sum()
+    if missing_counts.any():
+        print("Patients with missing scores per signature:\n" + missing_counts[missing_counts > 0].to_string())
+    master_df = master_df.dropna(subset=score_cols)
+    if master_df.empty:
+        raise ValueError("All patients were dropped for missing signature scores; check the per-signature counts above.")
+    print(f"\nDropped {n_before - len(master_df)} patients with missing signature scores ({len(master_df)} remain).")
+
+    print("\nStratifying Patients (Median Split)...")
+
     for sig in signatures:
         score_col = f'{sig}_Score'
         class_col = f'{sig}_Class'
@@ -100,23 +124,47 @@ def run_pipeline():
     # Detect Discordance
     print("\nAnalysing Cohort Discordance...")
     class_columns = [f'{sig}_Class' for sig in signatures]
-    master_df['Is_Discordant'] = master_df[class_columns].nunique(axis=1) > 1
-    
     total_patients = len(master_df)
-    discordant_count = master_df['Is_Discordant'].sum()
-    concordant_count = total_patients - discordant_count
-    
-    print(f"Discordant patients: {discordant_count} ({(discordant_count/total_patients)*100:.1f}%)")
-    print(f"Perfect agreement: {concordant_count} ({(concordant_count/total_patients)*100:.1f}%)")
+
+    # Any disagreement across the median-split classes (the original, noisy definition)
+    master_df['Is_Discordant_Median'] = master_df[class_columns].nunique(axis=1) > 1
+
+    # Margin rule: within each signature a patient is "clearly high" in the top `margin` fraction
+    # of the cohort and "clearly low" in the bottom `margin` fraction. Discordant = at least one
+    # signature clearly high AND at least one clearly low.
+    margin = load_discordance_margin()
+    pct_rank = master_df[[f'{sig}_Score' for sig in signatures]].rank(pct=True)
+    clearly_high = (pct_rank > 1 - margin).any(axis=1)
+    clearly_low = (pct_rank <= margin).any(axis=1)
+    master_df['Is_Discordant'] = clearly_high & clearly_low
+
+    # Patients who disagree by the median split but have no clear-cut conflict are borderline:
+    # excluded from both the concordant and discordant sets.
+    master_df['Discordance_Group'] = np.select(
+        [master_df['Is_Discordant'], ~master_df['Is_Discordant_Median']],
+        ['discordant', 'concordant'],
+        default='borderline'
+    )
+
+    n_signatures = len(signatures)
+    expected_independent = 1 - 2 * (1 - margin) ** n_signatures + (1 - 2 * margin) ** n_signatures
+    counts = master_df['Discordance_Group'].value_counts()
+    print(f"Margin: top/bottom {margin:.1%} of each signature counts as clearly high/low.")
+    print(f"Median-split discordance (any disagreement): {master_df['Is_Discordant_Median'].mean()*100:.1f}%")
+    print(f"Margin-rule discordance:                     {master_df['Is_Discordant'].mean()*100:.1f}%")
+    print(f"Expected under independent signatures:       {expected_independent*100:.1f}%")
+    for group in ['concordant', 'discordant', 'borderline']:
+        n = counts.get(group, 0)
+        print(f"  - {group}: {n} ({n/total_patients*100:.1f}%)")
 
     # Data Partitioning for Export
     print("\nExporting Results...")
     
-    # Isolate Discordant Cases
-    discordant_df = master_df[master_df['Is_Discordant']].copy()
+    # Isolate Discordant Cases (margin rule)
+    discordant_df = master_df[master_df['Discordance_Group'] == 'discordant'].copy()
     
-    # Isolate Concordant Cases and add a consensus label
-    concordant_df = master_df[~master_df['Is_Discordant']].copy()
+    # Isolate Concordant Cases (all eight median-split classes agree) and add a consensus label
+    concordant_df = master_df[master_df['Discordance_Group'] == 'concordant'].copy()
     concordant_df['Consensus_Risk'] = concordant_df['Kim10_Class'].map({1: 'High Risk', 0: 'Low Risk'})
     
     # Export to CSV

@@ -1,12 +1,15 @@
 import os
-import time
 import inspect
 import yaml
 import pandas as pd
 from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel, Field
+import argparse
+from run_paths import generation_path
+from signature_definitions import get_signature_reference_text
 import math
+import re
 
 load_dotenv()
 
@@ -15,6 +18,8 @@ load_dotenv()
 # ==========================================
 CONFIG_PATH = "config.yml"
 OUTPUT_DIR = "data/generation_outputs"
+MASTER_FILE = "data/processed/tcga_master_results.csv"
+DEFAULT_LIMIT = 6  # quick-test size; pass --limit 0 for the final full run
 
 with open(CONFIG_PATH, "r") as file:
     config = yaml.safe_load(file)
@@ -22,7 +27,7 @@ with open(CONFIG_PATH, "r") as file:
 model_to_use = config["pipeline"]["model_name"]
 generation_temp = float(config["pipeline"].get("temperature", 0.2))
 api_base = config["pipeline"].get("base_url", "http://127.0.0.1:1234/v1")
-api_key = config["pipeline"].get("api_key", "lmstudio")
+api_key = os.getenv("GENERATION_API_KEY") or config["pipeline"].get("api_key", "lmstudio")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 print(f"Loaded configuration: Local LM Studio targeting model '{model_to_use}'")
@@ -94,13 +99,14 @@ SYSTEM_INSTRUCTION = inspect.cleandoc("""
     Your task is to analyse transcriptomic profiles and resolve discordant prognostic risk classifications across multi-gene signatures.
 
     CRITICAL ANTI-HALLUCINATION CONSTRAINT:
-    Base your biological synthesis EXCLUSIVELY on data explicitly provided in this prompt: the "Transcriptomic Profile"
-    values and the "Verified Active Biological Pathways" context. You may reason about any gene listed in the
-    Transcriptomic Profile using its given expression value, even if that gene did not trigger an entry in the
-    Verified Active Biological Pathways section.
+    Base your biological synthesis EXCLUSIVELY on data explicitly provided in this prompt: the "Signature Definitions",
+    and, when they are present, the "Clinical Metadata", the "Transcriptomic Profile" values and the "Verified Active
+    Biological Pathways" context. You may reason about any gene listed in the Transcriptomic Profile using its given
+    expression value, even if that gene did not trigger an entry in the Verified Active Biological Pathways section.
     Do not introduce genes, biomarkers, or pathways that are not explicitly present in the provided context.
-    Do not invent which specific biomarkers a named signature (e.g. Oncotype DX, PAM50, BCI) mathematically weights
-    unless that mapping is stated in the Verified Active Biological Pathways context.
+    Describe how a named signature (e.g. Oncotype DX, PAM50, BCI) weights biomarkers only as stated in the
+    Signature Definitions; do not invent other weights or gene memberships.
+    If a section of evidence is not provided, do not make claims that would require it.
     Do not recommend medical treatments or clinical therapies; focus strictly on prognostic risk classification.
 """)
 
@@ -117,34 +123,59 @@ arbitration_schema = {
 # ==========================================
 # 5. Core Generation Function
 # ==========================================
-def generate_patient_summary(patient_id, clinical_data, signature_classifications, transcriptomic_data, active_pathways):
-    prompt = inspect.cleandoc(f"""
-        Please act as a Bioinformatics Arbitrator to resolve the prognostic discordance for this patient.
+# Which evidence blocks the model sees. Signature classifications are always included.
+ABLATIONS = {
+    "full":          {"clinical": True,  "expression": True,  "pathways": True},
+    "no_pathways":   {"clinical": True,  "expression": True,  "pathways": False},
+    "clinical_only": {"clinical": True,  "expression": False, "pathways": False},
+    "classes_only":  {"clinical": False, "expression": False, "pathways": False},
+}
 
-        Patient ID: {patient_id}
-        
-        --- Clinical Metadata ---
-        {clinical_data}
+FINAL_RESOLUTION_PATTERN = re.compile(r"FINAL RESOLUTION:\s*\**\s*(High|Low)\s+Risk", re.IGNORECASE)
 
-        --- Conflicting Algorithmic Risk Classifications (1 = High Risk, 0 = Low Risk) ---
-        {signature_classifications}
+def parse_final_resolution(text):
+    """Return 'High Risk' or 'Low Risk' from the last FINAL RESOLUTION line, or None if absent."""
+    matches = FINAL_RESOLUTION_PATTERN.findall(text or "")
+    if not matches:
+        return None
+    return f"{matches[-1].capitalize()} Risk"
 
-        --- Transcriptomic Profile (Key Biomarkers & Expression Levels) ---
-        {transcriptomic_data}
-        
-        --- Verified Active Biological Pathways (Reactome Database Extraction) ---
-        {active_pathways}
-        
-        REQUIRED ARBITRATION STEPS:
-        1. Conflict Diagnosis: Explicitly state WHICH algorithms are conflicting.
-        2. Mechanistic Root Cause: Using the provided pathways, explain EXACTLY why the algorithms disagreed based on how they mathematically weight different biomarkers.
-        3. Prognostic Resolution: Deliver a final, tie-breaking risk classification based on the biological evidence provided.
-        
-        IMPORTANT: Conclude your text with this exact phrase:
-        FINAL RESOLUTION: High Risk
-        or
-        FINAL RESOLUTION: Low Risk
-    """)
+def build_prompt(patient_id, clinical_data, signature_classifications, transcriptomic_data, active_pathways, ablation="full"):
+    include = ABLATIONS[ablation]
+    sections = [
+        "Please act as a Bioinformatics Arbitrator to resolve the prognostic discordance for this patient.",
+        f"Patient ID: {patient_id}",
+    ]
+    if include["clinical"]:
+        sections.append(f"--- Clinical Metadata ---\n{clinical_data}")
+    # Static description of the algorithms; shown in every ablation because it is not patient data
+    sections.append(f"--- Signature Definitions (how each algorithm scores a patient) ---\n{get_signature_reference_text()}")
+    sections.append(
+        "--- Conflicting Algorithmic Risk Classifications (1 = High Risk, 0 = Low Risk) ---\n"
+        f"{signature_classifications}"
+    )
+    if include["expression"]:
+        sections.append(f"--- Transcriptomic Profile (Key Biomarkers & Expression Levels) ---\n{transcriptomic_data}")
+    if include["pathways"]:
+        sections.append(f"--- Verified Active Biological Pathways (Reactome Database Extraction) ---\n{active_pathways}")
+
+    evidence = "the Signature Definitions and the provided pathways" if include["pathways"] else "the Signature Definitions and the provided evidence"
+    sections.append(
+        "REQUIRED ARBITRATION STEPS:\n"
+        "1. Conflict Diagnosis: Explicitly state WHICH algorithms are conflicting.\n"
+        f"2. Mechanistic Root Cause: Using {evidence}, explain EXACTLY why the algorithms disagreed based on how they mathematically weight different biomarkers.\n"
+        "3. Prognostic Resolution: Deliver a final, tie-breaking risk classification based on the biological evidence provided."
+    )
+    sections.append(
+        "IMPORTANT: Conclude your text with this exact phrase:\n"
+        "FINAL RESOLUTION: High Risk\n"
+        "or\n"
+        "FINAL RESOLUTION: Low Risk"
+    )
+    return "\n\n".join(sections)
+
+def generate_patient_summary(patient_id, clinical_data, signature_classifications, transcriptomic_data, active_pathways, ablation="full"):
+    prompt = build_prompt(patient_id, clinical_data, signature_classifications, transcriptomic_data, active_pathways, ablation)
 
     try:
         # Step 1: Generate reasoning and extract logprobs
@@ -209,8 +240,12 @@ def generate_patient_summary(patient_id, clinical_data, signature_classification
         
         parsed_result = ArbitrationResult.model_validate_json(formatting_response.choices[0].message.content)
 
+        # Prefer the class stated in the reasoning text itself, so the label matches the
+        # tokens the decision confidence was measured on; fall back to the extraction call.
+        final_risk_class = parse_final_resolution(raw_summary) or parsed_result.final_risk_class
+
         return (
-            parsed_result.final_risk_class,
+            final_risk_class,
             parsed_result.arbitration_summary,
             mean_confidence,
             mean_entropy,
@@ -226,7 +261,7 @@ def generate_patient_summary(patient_id, clinical_data, signature_classification
 # ==========================================
 # 6. Data Ingestion & Batch Execution
 # ==========================================
-def process_cohort(input_filename, output_filename):
+def process_cohort(input_filename, output_filename, ablation="full", limit=DEFAULT_LIMIT, resume=False):
     if not os.path.exists(input_filename):
         print(f"File not found: {input_filename}. Skipping cohort.")
         return
@@ -248,7 +283,7 @@ def process_cohort(input_filename, output_filename):
     
     # PAM50 (Includes overlapping Oncotype & IHC4 genes like ERBB2, ESR1, PGR, MKI67)
     "ACTR3B", "ANLN", "BAG1", "BCL2", "BIRC5", "BLVRA", "CCNB1", "CCNE1", 
-    "CDC20", "CDC6", "CDCA1", "CENPF", "CEP55", "CXXC5", "EGFR", "ERBB2", 
+    "CDC20", "CDC6", "CDCA1", "CDH3", "CENPF", "CEP55", "CXXC5", "EGFR", "ERBB2", 
     "ESR1", "EXO1", "FGFR4", "FOXA1", "FOXC1", "GPR160", "GRB7", "KIF2C", 
     "KNTC2", "KRT14", "KRT17", "KRT5", "MAPT", "MDM2", "MELK", "MIA", 
     "MKI67", "MLPH", "MMP11", "MYBL2", "MYC", "NAT1", "ORC6L", "PGR", 
@@ -276,17 +311,41 @@ def process_cohort(input_filename, output_filename):
     clinical_fields = [("years_to_birth", "Age at diagnosis"), ("ER.Status", "ER status"), ("pathologic_stage", "Pathologic stage")]
 
     available_tx_cols = [g for g in transcriptomic_columns if g in df.columns]
-    gene_medians = df[available_tx_cols].median()
 
-    results = []
-    # Set to sample_df = df to run the entire cohort
-    sample_df = df.head(6)
+    # Medians come from the full cohort so "upregulated" means the same thing for concordant and discordant cases
+    if os.path.exists(MASTER_FILE):
+        gene_medians = pd.read_csv(MASTER_FILE, usecols=available_tx_cols).median()
+    else:
+        print(f"[WARNING] {MASTER_FILE} not found; falling back to medians from {input_filename} only.")
+        gene_medians = df[available_tx_cols].median()
 
-    print(f"\nProcessing cohort from {input_filename} ({len(sample_df)} cases to process)...")
+    # limit=0 runs the entire cohort
+    sample_df = df if limit == 0 else df.head(limit)
+    include = ABLATIONS[ablation]
 
-    for _, row in sample_df.iterrows():
+    # Rows are appended to the output file as they finish, so a crash loses at most one case.
+    # --resume keeps the cases that already succeeded and retries the rest; otherwise start fresh.
+    done_ids = set()
+    if resume and os.path.exists(output_filename):
+        previous = pd.read_csv(output_filename, low_memory=False)
+        succeeded = previous[previous["final_risk_class"].isin(["High Risk", "Low Risk"])]
+        if len(succeeded) < len(previous):
+            print(f"Resuming: dropping {len(previous) - len(succeeded)} failed rows so they are retried.")
+        succeeded.to_csv(output_filename, index=False)
+        done_ids = set(succeeded["patient_id"])
+        print(f"Resuming: {len(done_ids)} cases already done in {output_filename}.")
+    elif os.path.exists(output_filename):
+        print(f"[NOTE] Overwriting existing {output_filename} (use --resume to continue it instead).")
+        os.remove(output_filename)
+
+    print(f"\nProcessing cohort from {input_filename} ({len(sample_df)} cases to process, ablation='{ablation}')...")
+
+    n_total = len(sample_df)
+    for position, (_, row) in enumerate(sample_df.iterrows(), start=1):
         p_id = row['patient_id']
-        print(f"Processing Patient: {p_id}...")
+        if p_id in done_ids:
+            continue
+        print(f"[{position}/{n_total}] Processing Patient: {p_id}...")
 
         clinical_meta = "\n".join(f"{label}: {row[col]}" for col, label in clinical_fields if col in row and pd.notna(row[col]))
         sig_classifications = "\n".join(f"{label}: {row[col]}" for label, col in sig_columns if col in row and pd.notna(row[col]))
@@ -303,29 +362,57 @@ def process_cohort(input_filename, output_filename):
             clinical_data=clinical_meta,
             signature_classifications=sig_classifications,
             transcriptomic_data=transcriptomics,
-            active_pathways=extracted_pathways_str
+            active_pathways=extracted_pathways_str,
+            ablation=ablation
         )
 
         record = row.to_dict()
+        # Log only the context the model actually saw, so the judge audits against the right evidence
         record.update({
+            'ablation': ablation,
             'final_risk_class': final_risk,
             'model_confidence_percent': confidence,
             'model_entropy_score': entropy,
             'decision_token_confidence': decision_conf,
             'min_token_confidence': min_conf,
             'weakest_token': weak_tok,
-            'clinical_data': clinical_meta,
+            'clinical_data': clinical_meta if include["clinical"] else "",
             'signature_classifications': sig_classifications,
-            'transcriptomic_data': transcriptomics,
-            'active_pathways': extracted_pathways_str,
+            'transcriptomic_data': transcriptomics if include["expression"] else "",
+            'active_pathways': extracted_pathways_str if include["pathways"] else "",
             'lmstudio_summary': summary
         })
-        results.append(record)
-        time.sleep(1)
+        append_result(output_filename, record)
 
-    pd.DataFrame(results).to_csv(output_filename, index=False)
     print(f"Results saved to: {output_filename}")
 
+def append_result(output_filename, record):
+    """Append one result row, writing the header only for a new file."""
+    new_row = pd.DataFrame([record])
+    if os.path.exists(output_filename):
+        existing_columns = list(pd.read_csv(output_filename, nrows=0).columns)
+        if existing_columns != list(new_row.columns):
+            raise ValueError(f"{output_filename} was written with different columns; rerun without --resume.")
+        new_row.to_csv(output_filename, mode="a", header=False, index=False)
+    else:
+        new_row.to_csv(output_filename, index=False)
+
 if __name__ == "__main__":
-    process_cohort("data/processed/tcga_concordant_cases.csv", os.path.join(OUTPUT_DIR, "concordant_results.csv"))
-    process_cohort("data/processed/tcga_discordant_cases.csv", os.path.join(OUTPUT_DIR, "discordant_results.csv"))
+    parser = argparse.ArgumentParser(description="Generate arbitration summaries for TCGA-BRCA cases.")
+    parser.add_argument("--model", default=None,
+                        help="Generation model name (defaults to pipeline.model_name in config.yml); used in output filenames.")
+    parser.add_argument("--ablation", choices=list(ABLATIONS), default="full",
+                        help="Which evidence the model sees (non-full runs are saved with a suffix).")
+    parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
+                        help=f"Cases per cohort (default {DEFAULT_LIMIT} for quick tests; 0 = whole cohort).")
+    parser.add_argument("--resume", action="store_true",
+                        help="Continue an interrupted run: keep finished cases, retry failed or missing ones.")
+    parser.add_argument("--cohorts", nargs="+", choices=["concordant", "discordant"], default=["concordant", "discordant"])
+    args = parser.parse_args()
+    if args.model:
+        model_to_use = args.model
+    print(f"Generating with model '{model_to_use}'")
+
+    for cohort in args.cohorts:
+        process_cohort(f"data/processed/tcga_{cohort}_cases.csv", generation_path(cohort, model_to_use, args.ablation),
+                       ablation=args.ablation, limit=args.limit, resume=args.resume)

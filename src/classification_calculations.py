@@ -4,6 +4,10 @@ import rpy2.robjects as robjects
 from rpy2.robjects import pandas2ri
 from rpy2.robjects.conversion import localconverter
 from scipy.stats import spearmanr
+from signature_definitions import (
+    ONCOTYPE_GROUPS, ONCOTYPE_SINGLE_GENES, BCI_HI_GENES, BCI_MGI_GENES, MAMMOSTRAT_GENES,
+    IHC4_WEIGHTS, KIM10_WEIGHTS, IRRS7_WEIGHTS, HU11_WEIGHTS,
+)
 
 
 # Oncotype DX, ✅
@@ -38,24 +42,13 @@ def calculate_oncotype_dx_score(df):
     High:         RS >= 31
     """
 
-    # GRB7 group
-    grb7_genes   = ['GRB7', 'ERBB2']
-    # ER group  
-    er_genes     = ['ESR1', 'PGR', 'BCL2', 'SCUBE2']
-    # Proliferation group
-    prolif_genes = ['MKI67', 'AURKA', 'BIRC5', 'CCNB1', 'MYBL2']
-    # Invasion group
-    inv_genes    = ['MMP11', 'CTSL2']
-    # Single genes
-    single_genes = ['CD68', 'GSTM1', 'BAG1']
-
     def group_score(row, genes):
         available = [g for g in genes if g in row.index]
         if not available:
             return 0
         return row[available].mean()
 
-    all_genes = grb7_genes + er_genes + prolif_genes + inv_genes + single_genes
+    all_genes = [g for genes, _ in ONCOTYPE_GROUPS.values() for g in genes] + list(ONCOTYPE_SINGLE_GENES)
     available = [g for g in all_genes if g in df.columns]
     missing   = [g for g in all_genes if g not in df.columns]
 
@@ -64,21 +57,8 @@ def calculate_oncotype_dx_score(df):
         print(f"Missing: {missing}")
 
     def calculate_rs(row):
-        grb7  = group_score(row, grb7_genes)
-        er    = group_score(row, er_genes)
-        prolif = group_score(row, prolif_genes)
-        inv   = group_score(row, inv_genes)
-        cd68  = row.get('CD68',  0)
-        gstm1 = row.get('GSTM1', 0)
-        bag1  = row.get('BAG1',  0)
-
-        rs = (0.47  * grb7
-            - 0.34  * er
-            + 1.04  * prolif
-            + 0.10  * inv
-            + 0.05  * cd68
-            - 0.08  * gstm1
-            - 0.07  * bag1)
+        rs = sum(weight * group_score(row, genes) for genes, weight in ONCOTYPE_GROUPS.values())
+        rs += sum(weight * row.get(gene, 0) for gene, weight in ONCOTYPE_SINGLE_GENES.items())
         return rs
 
     score = df[available].apply(calculate_rs, axis=1)
@@ -159,8 +139,8 @@ def calculate_bci_score(df):
     combining the HOXB13:IL17RB (H/I) ratio with the Molecular Grade Index (MGI).
     """
     
-    hi_genes = ['HOXB13', 'IL17RB']
-    mgi_genes = ['BUB1B', 'CENPA', 'NEK2', 'RACGAP1', 'RRM2']
+    hi_genes = BCI_HI_GENES
+    mgi_genes = BCI_MGI_GENES
     
     all_genes = hi_genes + mgi_genes
     missing = [g for g in all_genes if g not in df.columns]
@@ -196,7 +176,7 @@ def calculate_mammostrat_score(df):
     present_genes = []
     missing_genes = []
     
-    for gene in ['TP53', 'CEACAM5', 'NDRG1', 'SLC7A5']:
+    for gene in [g for g in MAMMOSTRAT_GENES if g != 'TRMT10C']:
         if gene in df.columns:
             present_genes.append(gene)
         else:
@@ -219,12 +199,7 @@ def calculate_mammostrat_score(df):
     return score
 
 def calculate_ihc4_score(df):
-    weights = {
-        'ESR1': -0.100, 
-        'PGR': -0.079,  
-        'ERBB2': 0.586,  
-        'MKI67': 0.240
-    }
+    weights = IHC4_WEIGHTS
     available_genes = [g for g in weights.keys() if g in df.columns]
     score = df[available_genes].apply(
         lambda row: sum(row[g] * weights[g] for g in available_genes), axis=1
@@ -245,12 +220,7 @@ def calculate_kim10_tnbc_score(df):
     Cut-off Value: 5.959715
     High Risk: score > 5.959715
     """
-    weights = {
-        'DGKH': 0.818636, 'GADD45B': 0.018069, 'KLF7': 0.605352, 
-        'LYST': 0.231666, 'NR6A1': 1.305352, 'PYCARD': -0.052086, 
-        'ROBO1': -0.196973, 'SLC22A20P': 0.968759, 
-        'SLC24A3': 0.098331, 'SLC45A4': 0.311646
-    }
+    weights = KIM10_WEIGHTS
 
     available_genes = [g for g in weights.keys() if g in df.columns]
 
@@ -265,10 +235,7 @@ def calculate_irrs7_score(df):
     IRRS-7 Signature (MDPI/Frontiers, 2025)
     Focus: Insulin Resistance-Related Prognostic Score.
     """
-    weights = {
-        'EZR': 0.040, 'LIFR': -0.046, 'TBC1D4': -0.138, 'SAA1': -0.0105, 
-        'NSF': 0.0218, 'RPL5': -0.0566, 'PGK1': 0.464
-    }
+    weights = IRRS7_WEIGHTS
     
     available_genes = [g for g in weights.keys() if g in df.columns]
     
@@ -282,12 +249,7 @@ def calculate_hu11_irg_score(df):
     Hu-11 IRG Signature (Hu et al., 2024)
     Focus: Inflammation-Related Genes and immune microenvironment.
     """
-    weights = {
-
-        'IL18': 0.115, 'IL12B': 0.203, 'RASGRP1': -0.142, 'HPN': 0.089,
-        'CLEC5A': 0.176, 'SCARF1': 0.134, 'TACR3': 0.212, 'VIP': -0.108,
-        'CCL2': 0.095, 'CALCRL': 0.122, 'ABCA1': -0.076
-    }
+    weights = HU11_WEIGHTS
     
     available_genes = [g for g in weights.keys() if g in df.columns]
     
