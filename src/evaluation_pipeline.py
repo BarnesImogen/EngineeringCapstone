@@ -205,8 +205,7 @@ for index, row in df.iterrows():
             'transcriptomic_data': transcriptomic_data,
             'active_pathways': active_pathways,
             generation_input_column: generated_text,
-            'model_confidence_percent': row.get('model_confidence_percent'), 
-            'model_entropy_score': row.get('model_entropy_score'),           
+            # 'model_confidence_percent' / 'model_entropy_score' (logprobs) disabled for now
             'ungrounded_claim_count': n_ungrounded,
             'ungrounded_claims': json.dumps(parsed_report.ungrounded_claims),
             'bio_synthesis_score': bio_score,
@@ -231,7 +230,7 @@ print(f"\nStructural evaluation complete. Results stored successfully in: {outpu
 
 if not final_df.empty:
     print("\n--- Structured Audit Metrics ---")
-    print(f"Mean Generation Confidence:    {final_df['model_confidence_percent'].mean():.2f}%")
+    # print(f"Mean Generation Confidence:    {final_df['model_confidence_percent'].mean():.2f}%")  # logprobs disabled
     print(f"Mean Biological Synthesis:     {final_df['bio_synthesis_score'].mean():.2f} / 5.0 (raw {final_df['bio_synthesis_score_raw'].mean():.2f})")
     print(f"Mean Ungrounded Claims:        {final_df['ungrounded_claim_count'].mean():.2f} per summary "
           f"({(final_df['ungrounded_claim_count'] > 0).mean() * 100:.1f}% of summaries have at least one)")

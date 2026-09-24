@@ -56,11 +56,12 @@ def run_concordant_check(model, ablation="full"):
     for consensus, group in valid.groupby("Consensus_Risk"):
         print(f"  Consensus {consensus}: LLM agrees on {group['agrees'].mean()*100:.1f}% (n={len(group)})")
 
-    # Do the model's own confidence signals separate its right answers from its wrong ones?
-    signals = [c for c in ["model_confidence_percent", "decision_token_confidence", "model_entropy_score"] if c in valid.columns]
-    if signals and valid["agrees"].nunique() == 2:
-        print("\nMean confidence signals when the LLM agrees vs disagrees:")
-        print(valid.groupby("agrees")[signals].mean().rename(index={True: "agrees", False: "disagrees"}).round(3).to_string())
+    # DISABLED (logprobs): do the model's own confidence signals separate its right answers from its wrong ones?
+    # Semantic entropy is validated in src/semantic_entropy.py --validate instead.
+    # signals = [c for c in ["model_confidence_percent", "decision_token_confidence", "model_entropy_score"] if c in valid.columns]
+    # if signals and valid["agrees"].nunique() == 2:
+    #     print("\nMean confidence signals when the LLM agrees vs disagrees:")
+    #     print(valid.groupby("agrees")[signals].mean().rename(index={True: "agrees", False: "disagrees"}).round(3).to_string())
 
     # Gate: flag (do not block) a model that fails on cases where the correct answer is known
     min_required = load_min_agreement()

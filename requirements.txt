@@ -15,6 +15,5 @@ ragas
 langchain-openai
 langchain-community
 datasets
-lifelines
 pyyaml
 pydantic

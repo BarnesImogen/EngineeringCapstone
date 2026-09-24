@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 import argparse
 from run_paths import generation_path
 from signature_definitions import get_signature_reference_text
-import math
+# import math  # only needed by the logprob confidence code, currently disabled
 import re
 
 load_dotenv()
@@ -20,6 +20,7 @@ CONFIG_PATH = "config.yml"
 OUTPUT_DIR = "data/generation_outputs"
 MASTER_FILE = "data/processed/tcga_master_results.csv"
 DEFAULT_LIMIT = 6  # quick-test size; pass --limit 0 for the final full run
+# _logprobs_warning_shown = False  # logprob confidence is disabled for now (semantic entropy is the main signal)
 
 with open(CONFIG_PATH, "r") as file:
     config = yaml.safe_load(file)
@@ -178,52 +179,65 @@ def generate_patient_summary(patient_id, clinical_data, signature_classification
     prompt = build_prompt(patient_id, clinical_data, signature_classifications, transcriptomic_data, active_pathways, ablation)
 
     try:
-        # Step 1: Generate reasoning and extract logprobs
+        # Step 1: Generate the reasoning text
         reasoning_response = client.chat.completions.create(
             model=model_to_use,
             temperature=generation_temp,
             messages=[
                 {"role": "system", "content": SYSTEM_INSTRUCTION},
                 {"role": "user", "content": prompt}
-            ],
-            logprobs=True,
-            top_logprobs=1
+            ]
         )
-        
+
         raw_summary = reasoning_response.choices[0].message.content
-        
-        total_entropy = 0.0
-        total_prob = 0.0
-        token_count = 0
-        min_token_prob = 1.0
-        weakest_token = ""
-        decision_token_confidence = 0.0
 
-        if reasoning_response.choices[0].logprobs and reasoning_response.choices[0].logprobs.content:
-            logprob_data = reasoning_response.choices[0].logprobs.content
-            token_count = len(logprob_data)
-            
-            for token_obj in logprob_data:
-                lp = token_obj.logprob 
-                prob = math.exp(lp)
-                
-                total_prob += prob
-                total_entropy -= prob * lp
-                
-                if prob < min_token_prob:
-                    min_token_prob = prob
-                    weakest_token = token_obj.token.strip()
-
-            # Locate the specific token for the final decision by scanning backwards
-            for token_obj in reversed(logprob_data):
-                clean_t = token_obj.token.strip().lower()
-                if clean_t in ["high", "low"]:
-                    decision_token_confidence = round(math.exp(token_obj.logprob) * 100, 2)
-                    break
-
-        mean_confidence = round((total_prob / token_count) * 100, 2) if token_count > 0 else 0.0
-        mean_entropy = round(total_entropy / token_count, 4) if token_count > 0 else 0.0
-        min_confidence = round(min_token_prob * 100, 2) if token_count > 0 else 0.0
+        # ------------------------------------------------------------------
+        # DISABLED: token-logprob confidence/entropy. Semantic entropy
+        # (src/semantic_entropy.py) is the uncertainty measure for now.
+        # To bring it back: uncomment this block, add `logprobs=True,
+        # top_logprobs=1` to the call above, uncomment `import math` and
+        # `_logprobs_warning_shown`, and restore the extra return values,
+        # the record columns in process_cohort, and the readers in
+        # concordant_check.py and evaluation_pipeline.py.
+        # ------------------------------------------------------------------
+        # total_entropy = 0.0
+        # total_prob = 0.0
+        # token_count = 0
+        # min_token_prob = 1.0
+        # weakest_token = ""
+        # decision_token_confidence = 0.0
+        #
+        # if reasoning_response.choices[0].logprobs and reasoning_response.choices[0].logprobs.content:
+        #     logprob_data = reasoning_response.choices[0].logprobs.content
+        #     token_count = len(logprob_data)
+        #
+        #     for token_obj in logprob_data:
+        #         lp = token_obj.logprob
+        #         prob = math.exp(lp)
+        #
+        #         total_prob += prob
+        #         total_entropy -= prob * lp
+        #
+        #         if prob < min_token_prob:
+        #             min_token_prob = prob
+        #             weakest_token = token_obj.token.strip()
+        #
+        #     # Locate the specific token for the final decision by scanning backwards
+        #     for token_obj in reversed(logprob_data):
+        #         clean_t = token_obj.token.strip().lower()
+        #         if clean_t in ["high", "low"]:
+        #             decision_token_confidence = round(math.exp(token_obj.logprob) * 100, 2)
+        #             break
+        # else:
+        #     global _logprobs_warning_shown
+        #     if not _logprobs_warning_shown:
+        #         print("  [WARNING] Server returned no logprobs; confidence/entropy fields will be 0.0 "
+        #               "for this run (not a real measurement). Check the loaded model's runtime engine in LM Studio.")
+        #         _logprobs_warning_shown = True
+        #
+        # mean_confidence = round((total_prob / token_count) * 100, 2) if token_count > 0 else 0.0
+        # mean_entropy = round(total_entropy / token_count, 4) if token_count > 0 else 0.0
+        # min_confidence = round(min_token_prob * 100, 2) if token_count > 0 else 0.0
 
         # Step 2: Enforce strict JSON schema
         format_prompt = f"Extract the final risk class and the arbitration summary from the following text:\n\n{raw_summary}"
@@ -240,23 +254,14 @@ def generate_patient_summary(patient_id, clinical_data, signature_classification
         
         parsed_result = ArbitrationResult.model_validate_json(formatting_response.choices[0].message.content)
 
-        # Prefer the class stated in the reasoning text itself, so the label matches the
-        # tokens the decision confidence was measured on; fall back to the extraction call.
+        # Prefer the class stated in the reasoning text itself; fall back to the extraction call.
         final_risk_class = parse_final_resolution(raw_summary) or parsed_result.final_risk_class
 
-        return (
-            final_risk_class,
-            parsed_result.arbitration_summary,
-            mean_confidence,
-            mean_entropy,
-            decision_token_confidence,
-            min_confidence,
-            weakest_token
-        )
+        return final_risk_class, parsed_result.arbitration_summary
         
     except Exception as e:
         print(f"  [ERROR] Generating summary for {patient_id}: {e}")
-        return "Error", f"Error: {e}", 0.0, 0.0, 0.0, 0.0, ""
+        return "Error", f"Error: {e}"
 
 # ==========================================
 # 6. Data Ingestion & Batch Execution
@@ -357,7 +362,7 @@ def process_cohort(input_filename, output_filename, ablation="full", limit=DEFAU
         # Get Reactome pathways for the upregulated genes
         extracted_pathways_str = get_reactome_active_pathways(upregulated_genes, REACTOME_INDEX)
 
-        final_risk, summary, confidence, entropy, decision_conf, min_conf, weak_tok = generate_patient_summary(
+        final_risk, summary = generate_patient_summary(
             patient_id=p_id,
             clinical_data=clinical_meta,
             signature_classifications=sig_classifications,
@@ -371,11 +376,8 @@ def process_cohort(input_filename, output_filename, ablation="full", limit=DEFAU
         record.update({
             'ablation': ablation,
             'final_risk_class': final_risk,
-            'model_confidence_percent': confidence,
-            'model_entropy_score': entropy,
-            'decision_token_confidence': decision_conf,
-            'min_token_confidence': min_conf,
-            'weakest_token': weak_tok,
+            # 'model_confidence_percent', 'model_entropy_score', 'decision_token_confidence',
+            # 'min_token_confidence' and 'weakest_token' (logprob fields) are disabled for now.
             'clinical_data': clinical_meta if include["clinical"] else "",
             'signature_classifications': sig_classifications,
             'transcriptomic_data': transcriptomics if include["expression"] else "",
