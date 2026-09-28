@@ -1,17 +1,16 @@
 import os
 import argparse
 from datetime import date
-import yaml
 import pandas as pd
-from run_paths import generation_path, EVALUATION_DIR
+from run_paths import generation_path, EVALUATION_DIR, load_config
 
 SUMMARY_PATH = os.path.join(EVALUATION_DIR, "concordant_check_summary.csv")
 DEFAULT_MIN_AGREEMENT = 0.8
 MAX_FAILED_FRACTION = 0.1
 
+config = load_config()
+
 def load_min_agreement():
-    with open("config.yml", "r") as file:
-        config = yaml.safe_load(file)
     return float(config.get("evaluation", {}).get("min_concordant_agreement", DEFAULT_MIN_AGREEMENT))
 
 def save_summary(row):
@@ -90,6 +89,5 @@ if __name__ == "__main__":
     parser.add_argument("--model", default=None, help="Generation model whose outputs to check (default: config pipeline.model_name).")
     parser.add_argument("--ablation", default="full")
     args = parser.parse_args()
-    with open("config.yml", "r") as file:
-        default_model = yaml.safe_load(file)["pipeline"]["model_name"]
+    default_model = config["pipeline"]["model_name"]
     run_concordant_check(args.model or default_model, args.ablation)

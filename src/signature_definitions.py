@@ -31,6 +31,7 @@ BCI_MGI_GENES = ["BUB1B", "CENPA", "NEK2", "RACGAP1", "RRM2"]
 
 # Mammostrat proxy: unweighted mean of these (TRMT10C may appear as HTF9C / RG9MTD1)
 MAMMOSTRAT_GENES = ["TP53", "CEACAM5", "NDRG1", "SLC7A5", "TRMT10C"]
+MAMMOSTRAT_ALIASES = ["HTF9C", "RG9MTD1"]  # alternate symbols for TRMT10C in some annotation builds
 
 IHC4_WEIGHTS = {"ESR1": -0.100, "PGR": -0.079, "ERBB2": 0.586, "MKI67": 0.240}
 
@@ -51,6 +52,35 @@ HU11_WEIGHTS = {
     "CLEC5A": 0.176, "SCARF1": 0.134, "TACR3": 0.212, "VIP": -0.108,
     "CCL2": 0.095, "CALCRL": 0.122, "ABCA1": -0.076,
 }
+
+# Canonical (score/class column key, display label) pair for each signature, in cohort/prompt order.
+SIGNATURES = [
+    ("OncotypeDX", "Oncotype DX"),
+    ("Pam50", "PAM50"),
+    ("BCI", "Breast Cancer Index"),
+    ("Mammostrat", "Mammostrat"),
+    ("IHC4", "IHC4"),
+    ("Kim10", "Kim-10"),
+    ("IRRS7", "IRRS-7"),
+    ("Hu11", "Hu-11"),
+]
+
+def get_all_signature_genes():
+    """Every gene symbol used by any signature, plus Mammostrat's TRMT10C aliases: the full
+    transcriptomic panel shown to the model."""
+    genes = set(PAM50_GENES)
+    for group_genes, _ in ONCOTYPE_GROUPS.values():
+        genes.update(group_genes)
+    genes.update(ONCOTYPE_SINGLE_GENES)
+    genes.update(BCI_HI_GENES)
+    genes.update(BCI_MGI_GENES)
+    genes.update(MAMMOSTRAT_GENES)
+    genes.update(MAMMOSTRAT_ALIASES)
+    genes.update(IHC4_WEIGHTS)
+    genes.update(KIM10_WEIGHTS)
+    genes.update(IRRS7_WEIGHTS)
+    genes.update(HU11_WEIGHTS)
+    return sorted(genes)
 
 def _format_weights(weights):
     return ", ".join(f"{gene} ({weight:+g})" for gene, weight in weights.items())

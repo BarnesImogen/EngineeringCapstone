@@ -1,23 +1,24 @@
 import os
 import sys
-import yaml
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-sys.path.append(os.path.abspath('src')) 
+sys.path.append(os.path.abspath('src'))
 
 from data_prep import load_and_merge_tcga
+from run_paths import load_config
+from signature_definitions import SIGNATURES
 from classification_calculations import (
-    calculate_oncotype_dx_score, 
-    calculate_pam50_score, 
-    calculate_bci_score, 
-    fetch_pam50_centroids, 
-    calculate_mammostrat_score, 
-    calculate_ihc4_score, 
-    calculate_kim10_tnbc_score, 
-    calculate_irrs7_score, 
+    calculate_oncotype_dx_score,
+    calculate_pam50_score,
+    calculate_bci_score,
+    fetch_pam50_centroids,
+    calculate_mammostrat_score,
+    calculate_ihc4_score,
+    calculate_kim10_tnbc_score,
+    calculate_irrs7_score,
     calculate_hu11_irg_score
 )
 
@@ -57,8 +58,7 @@ def generate_correlation_heatmap(df, signatures, output_dir):
 
 def load_discordance_margin(config_path="config.yml"):
     """Fraction (0-0.5] of each signature's tails counted as clearly high/low; 0.5 reproduces the median split."""
-    with open(config_path, "r") as file:
-        config = yaml.safe_load(file)
+    config = load_config(config_path)
     margin = float(config.get("bioinformatics", {}).get("discordance_margin", 1 / 3))
     if not 0 < margin <= 0.5:
         raise ValueError(f"discordance_margin must be in (0, 0.5], got {margin}")
@@ -94,7 +94,7 @@ def run_pipeline():
     master_df['Hu11_Score'] = calculate_hu11_irg_score(master_df)
 
     # Stratify into Binary Classes
-    signatures = ['OncotypeDX', 'Pam50', 'BCI', 'Mammostrat', 'IHC4', 'Kim10', 'IRRS7', 'Hu11']
+    signatures = [key for key, _ in SIGNATURES]
 
     # A NaN score would otherwise compare False against the median and be labelled Low Risk,
     # so drop patients without a complete set of scores.

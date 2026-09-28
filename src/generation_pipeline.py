@@ -1,15 +1,12 @@
 import os
-import inspect
-import yaml
 import pandas as pd
 from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel, Field
 import argparse
-from run_paths import generation_path
-from signature_definitions import get_signature_reference_text
-# import math  # only needed by the logprob confidence code, currently disabled
-import re
+from run_paths import generation_path, load_config
+from signature_definitions import get_all_signature_genes, SIGNATURES
+from arbitration import SYSTEM_INSTRUCTION, ABLATIONS, build_prompt, parse_final_resolution
 
 load_dotenv()
 
@@ -20,14 +17,12 @@ CONFIG_PATH = "config.yml"
 OUTPUT_DIR = "data/generation_outputs"
 MASTER_FILE = "data/processed/tcga_master_results.csv"
 DEFAULT_LIMIT = 6  # quick-test size; pass --limit 0 for the final full run
-# _logprobs_warning_shown = False  # logprob confidence is disabled for now (semantic entropy is the main signal)
 
-with open(CONFIG_PATH, "r") as file:
-    config = yaml.safe_load(file)
+config = load_config(CONFIG_PATH)
 
 model_to_use = config["pipeline"]["model_name"]
 generation_temp = float(config["pipeline"].get("temperature", 0.2))
-api_base = config["pipeline"].get("base_url", "http://127.0.0.1:1234/v1")
+api_base = config["pipeline"]["base_url"]
 api_key = os.getenv("GENERATION_API_KEY") or config["pipeline"].get("api_key", "lmstudio")
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -93,24 +88,11 @@ def get_reactome_active_pathways(upregulated_genes, reactome_index):
     return "\n".join(active_contexts[:5]) # Limit to top 5 most relevant to avoid prompt bloat
 
 # ==========================================
-# 4. System Instruction & Schema
+# 4. Extraction Schema
 # ==========================================
-SYSTEM_INSTRUCTION = inspect.cleandoc("""
-    You are an advanced bioinformatics AI specialising in genomic oncology.
-    Your task is to analyse transcriptomic profiles and resolve discordant prognostic risk classifications across multi-gene signatures.
-
-    CRITICAL ANTI-HALLUCINATION CONSTRAINT:
-    Base your biological synthesis EXCLUSIVELY on data explicitly provided in this prompt: the "Signature Definitions",
-    and, when they are present, the "Clinical Metadata", the "Transcriptomic Profile" values and the "Verified Active
-    Biological Pathways" context. You may reason about any gene listed in the Transcriptomic Profile using its given
-    expression value, even if that gene did not trigger an entry in the Verified Active Biological Pathways section.
-    Do not introduce genes, biomarkers, or pathways that are not explicitly present in the provided context.
-    Describe how a named signature (e.g. Oncotype DX, PAM50, BCI) weights biomarkers only as stated in the
-    Signature Definitions; do not invent other weights or gene memberships.
-    If a section of evidence is not provided, do not make claims that would require it.
-    Do not recommend medical treatments or clinical therapies; focus strictly on prognostic risk classification.
-""")
-
+# SYSTEM_INSTRUCTION, ABLATIONS and build_prompt live in arbitration.py (pure, no side
+# effects), so semantic_entropy.py can import them without pulling in this script's
+# config/client/Reactome setup.
 class ArbitrationResult(BaseModel):
     final_risk_class: str = Field(description="Must strictly be either 'High Risk' or 'Low Risk'.")
     arbitration_summary: str = Field(description="The structured markdown summary executing the 3 required arbitration steps: Conflict Diagnosis, Mechanistic Root Cause, and Prognostic Resolution.")
@@ -124,57 +106,6 @@ arbitration_schema = {
 # ==========================================
 # 5. Core Generation Function
 # ==========================================
-# Which evidence blocks the model sees. Signature classifications are always included.
-ABLATIONS = {
-    "full":          {"clinical": True,  "expression": True,  "pathways": True},
-    "no_pathways":   {"clinical": True,  "expression": True,  "pathways": False},
-    "clinical_only": {"clinical": True,  "expression": False, "pathways": False},
-    "classes_only":  {"clinical": False, "expression": False, "pathways": False},
-}
-
-FINAL_RESOLUTION_PATTERN = re.compile(r"FINAL RESOLUTION:\s*\**\s*(High|Low)\s+Risk", re.IGNORECASE)
-
-def parse_final_resolution(text):
-    """Return 'High Risk' or 'Low Risk' from the last FINAL RESOLUTION line, or None if absent."""
-    matches = FINAL_RESOLUTION_PATTERN.findall(text or "")
-    if not matches:
-        return None
-    return f"{matches[-1].capitalize()} Risk"
-
-def build_prompt(patient_id, clinical_data, signature_classifications, transcriptomic_data, active_pathways, ablation="full"):
-    include = ABLATIONS[ablation]
-    sections = [
-        "Please act as a Bioinformatics Arbitrator to resolve the prognostic discordance for this patient.",
-        f"Patient ID: {patient_id}",
-    ]
-    if include["clinical"]:
-        sections.append(f"--- Clinical Metadata ---\n{clinical_data}")
-    # Static description of the algorithms; shown in every ablation because it is not patient data
-    sections.append(f"--- Signature Definitions (how each algorithm scores a patient) ---\n{get_signature_reference_text()}")
-    sections.append(
-        "--- Conflicting Algorithmic Risk Classifications (1 = High Risk, 0 = Low Risk) ---\n"
-        f"{signature_classifications}"
-    )
-    if include["expression"]:
-        sections.append(f"--- Transcriptomic Profile (Key Biomarkers & Expression Levels) ---\n{transcriptomic_data}")
-    if include["pathways"]:
-        sections.append(f"--- Verified Active Biological Pathways (Reactome Database Extraction) ---\n{active_pathways}")
-
-    evidence = "the Signature Definitions and the provided pathways" if include["pathways"] else "the Signature Definitions and the provided evidence"
-    sections.append(
-        "REQUIRED ARBITRATION STEPS:\n"
-        "1. Conflict Diagnosis: Explicitly state WHICH algorithms are conflicting.\n"
-        f"2. Mechanistic Root Cause: Using {evidence}, explain EXACTLY why the algorithms disagreed based on how they mathematically weight different biomarkers.\n"
-        "3. Prognostic Resolution: Deliver a final, tie-breaking risk classification based on the biological evidence provided."
-    )
-    sections.append(
-        "IMPORTANT: Conclude your text with this exact phrase:\n"
-        "FINAL RESOLUTION: High Risk\n"
-        "or\n"
-        "FINAL RESOLUTION: Low Risk"
-    )
-    return "\n\n".join(sections)
-
 def generate_patient_summary(patient_id, clinical_data, signature_classifications, transcriptomic_data, active_pathways, ablation="full"):
     prompt = build_prompt(patient_id, clinical_data, signature_classifications, transcriptomic_data, active_pathways, ablation)
 
@@ -191,53 +122,9 @@ def generate_patient_summary(patient_id, clinical_data, signature_classification
 
         raw_summary = reasoning_response.choices[0].message.content
 
-        # ------------------------------------------------------------------
-        # DISABLED: token-logprob confidence/entropy. Semantic entropy
-        # (src/semantic_entropy.py) is the uncertainty measure for now.
-        # To bring it back: uncomment this block, add `logprobs=True,
-        # top_logprobs=1` to the call above, uncomment `import math` and
-        # `_logprobs_warning_shown`, and restore the extra return values,
-        # the record columns in process_cohort, and the readers in
-        # concordant_check.py and evaluation_pipeline.py.
-        # ------------------------------------------------------------------
-        # total_entropy = 0.0
-        # total_prob = 0.0
-        # token_count = 0
-        # min_token_prob = 1.0
-        # weakest_token = ""
-        # decision_token_confidence = 0.0
-        #
-        # if reasoning_response.choices[0].logprobs and reasoning_response.choices[0].logprobs.content:
-        #     logprob_data = reasoning_response.choices[0].logprobs.content
-        #     token_count = len(logprob_data)
-        #
-        #     for token_obj in logprob_data:
-        #         lp = token_obj.logprob
-        #         prob = math.exp(lp)
-        #
-        #         total_prob += prob
-        #         total_entropy -= prob * lp
-        #
-        #         if prob < min_token_prob:
-        #             min_token_prob = prob
-        #             weakest_token = token_obj.token.strip()
-        #
-        #     # Locate the specific token for the final decision by scanning backwards
-        #     for token_obj in reversed(logprob_data):
-        #         clean_t = token_obj.token.strip().lower()
-        #         if clean_t in ["high", "low"]:
-        #             decision_token_confidence = round(math.exp(token_obj.logprob) * 100, 2)
-        #             break
-        # else:
-        #     global _logprobs_warning_shown
-        #     if not _logprobs_warning_shown:
-        #         print("  [WARNING] Server returned no logprobs; confidence/entropy fields will be 0.0 "
-        #               "for this run (not a real measurement). Check the loaded model's runtime engine in LM Studio.")
-        #         _logprobs_warning_shown = True
-        #
-        # mean_confidence = round((total_prob / token_count) * 100, 2) if token_count > 0 else 0.0
-        # mean_entropy = round(total_entropy / token_count, 4) if token_count > 0 else 0.0
-        # min_confidence = round(min_token_prob * 100, 2) if token_count > 0 else 0.0
+        # Token-logprob confidence/entropy is disabled for now; semantic entropy
+        # (src/semantic_entropy.py) is the uncertainty measure. See TODO.md and
+        # git history for the previous implementation if it needs reviving.
 
         # Step 2: Enforce strict JSON schema
         format_prompt = f"Extract the final risk class and the arbitration summary from the following text:\n\n{raw_summary}"
@@ -275,44 +162,11 @@ def process_cohort(input_filename, output_filename, ablation="full", limit=DEFAU
     if "Unnamed: 0" in df.columns:
         df = df.rename(columns={"Unnamed: 0": "patient_id"})
 
-    sig_columns = [
-        ("Oncotype DX", "OncotypeDX_Class"), ("PAM50", "Pam50_Class"),
-        ("Breast Cancer Index", "BCI_Class"), ("Mammostrat", "Mammostrat_Class"),
-        ("IHC4", "IHC4_Class"), ("Kim-10", "Kim10_Class"),
-        ("IRRS-7", "IRRS7_Class"), ("Hu-11", "Hu11_Class")
-    ]
+    sig_columns = [(label, f"{key}_Class") for key, label in SIGNATURES]
 
-    transcriptomic_columns = [
-    # Oncotype DX & IHC4 Specific
-    "SCUBE2", "AURKA", "CTSL2", "CD68", "GSTM1", 
-    
-    # PAM50 (Includes overlapping Oncotype & IHC4 genes like ERBB2, ESR1, PGR, MKI67)
-    "ACTR3B", "ANLN", "BAG1", "BCL2", "BIRC5", "BLVRA", "CCNB1", "CCNE1", 
-    "CDC20", "CDC6", "CDCA1", "CDH3", "CENPF", "CEP55", "CXXC5", "EGFR", "ERBB2", 
-    "ESR1", "EXO1", "FGFR4", "FOXA1", "FOXC1", "GPR160", "GRB7", "KIF2C", 
-    "KNTC2", "KRT14", "KRT17", "KRT5", "MAPT", "MDM2", "MELK", "MIA", 
-    "MKI67", "MLPH", "MMP11", "MYBL2", "MYC", "NAT1", "ORC6L", "PGR", 
-    "PHGDH", "PTTG1", "RRM2", "SFRP1", "SLC39A6", "TMEM45B", "TYMS", 
-    "UBE2C", "UBE2T",
+    # Every gene symbol used by any signature (single source of truth: signature_definitions.py)
+    transcriptomic_columns = get_all_signature_genes()
 
-    # Breast Cancer Index (BCI)
-    "HOXB13", "IL17RB", "BUB1B", "CENPA", "NEK2", "RACGAP1",
-    
-    # Mammostrat Proxy Genes
-    "TP53", "CEACAM5", "NDRG1", "SLC7A5", "TRMT10C", "HTF9C", "RG9MTD1",
-    
-    # Kim-10 TNBC Signature
-    "DGKH", "GADD45B", "KLF7", "LYST", "NR6A1", "PYCARD", "ROBO1", 
-    "SLC22A20P", "SLC24A3", "SLC45A4",
-    
-    # IRRS-7 Insulin Resistance Signature
-    "EZR", "LIFR", "TBC1D4", "SAA1", "NSF", "RPL5", "PGK1",
-    
-    # Hu-11 Inflammation Signature
-    "IL18", "IL12B", "RASGRP1", "HPN", "CLEC5A", "SCARF1", "TACR3", 
-    "VIP", "CCL2", "CALCRL", "ABCA1"
-    ]
-    
     clinical_fields = [("years_to_birth", "Age at diagnosis"), ("ER.Status", "ER status"), ("pathologic_stage", "Pathologic stage")]
 
     available_tx_cols = [g for g in transcriptomic_columns if g in df.columns]

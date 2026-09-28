@@ -1,8 +1,12 @@
 # CDSS Configuration Settings
 #
 # Both stages talk to any OpenAI-compatible endpoint (LM Studio, OpenAI, vLLM, ...).
-# To use a hosted service, change base_url/model and set the key in .env via
-# GENERATION_API_KEY / JUDGE_API_KEY (environment variables override api_key below).
+# base_url below is the ONLY place the endpoint is set — generation_pipeline.py,
+# evaluation_pipeline.py and semantic_entropy.py all read it from here, so switching
+# LM Studio for a hosted service just means editing pipeline.base_url / evaluation.base_url
+# (and model_name) below. Both base_url fields are required.
+# Set the key in .env via GENERATION_API_KEY / JUDGE_API_KEY (environment variables
+# override api_key below).
 # Keep the judge model DIFFERENT from the generation model to avoid self-preference bias.
 
 bioinformatics:

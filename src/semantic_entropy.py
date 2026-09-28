@@ -46,17 +46,15 @@ from collections import Counter
 
 import numpy as np
 import pandas as pd
-import yaml
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from generation_pipeline import SYSTEM_INSTRUCTION, build_prompt, parse_final_resolution
-from run_paths import EVALUATION_DIR, evaluation_path, generation_path, run_tag
+from arbitration import SYSTEM_INSTRUCTION, build_prompt, parse_final_resolution
+from run_paths import EVALUATION_DIR, evaluation_path, generation_path, run_tag, load_config
 
 load_dotenv()
 
-with open("config.yml", "r") as file:
-    config = yaml.safe_load(file)
+config = load_config()
 
 DEFAULT_LIMIT = 6
 ENTAILMENT_CACHE = os.path.join(EVALUATION_DIR, "entailment_cache.json")
@@ -87,9 +85,9 @@ def sampling_prompt(evidence_prompt, question):
 # Clients
 # ==========================================
 def make_clients():
-    gen = OpenAI(base_url=config["pipeline"].get("base_url", "http://127.0.0.1:1234/v1"),
+    gen = OpenAI(base_url=config["pipeline"]["base_url"],
                  api_key=os.getenv("GENERATION_API_KEY") or config["pipeline"].get("api_key", "lmstudio"))
-    judge = OpenAI(base_url=config["evaluation"].get("base_url", "http://127.0.0.1:1234/v1"),
+    judge = OpenAI(base_url=config["evaluation"]["base_url"],
                    api_key=os.getenv("JUDGE_API_KEY") or config["evaluation"].get("api_key", "lmstudio"))
     return gen, judge
 

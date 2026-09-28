@@ -13,18 +13,114 @@ This project takes TCGA-BRCA patients on whom eight published gene expression si
 | The LLM can **interpret** conflicts | Judge audit of grounding, mechanistic reasoning and resolution; ungrounded-claim counts; ablations that remove evidence | `evaluation_pipeline.py`, `generation_pipeline.py --ablation` |
 | The interpretation can be trusted (or flagged as unreliable) | Discrete semantic entropy (Farquhar et al., Nature 2024), validated by AUROC and rejection accuracy | `semantic_entropy.py` |
 
-## Workflow
+## Setup
 
-All scripts are run from the repository root.
+### 1. Raw data
 
-1. Put the raw TCGA BRCA files and `ReactomePathways.gmt` in `data/raw/`.
-2. `python src/bioinformatics_pipeline.py` scores the eight signatures and writes the concordant, discordant and borderline case tables to `data/processed/`. Requires R with the Bioconductor `genefu` package for `rpy2`. The discordance margin is `bioinformatics.discordance_margin` in `config.yml`.
-3. `python src/generation_pipeline.py --model NAME [--ablation full|no_pathways|clinical_only|classes_only] [--limit N]` produces the LLM arbitration summaries. `--limit` defaults to 6 for quick tests; use `--limit 0` for the full cohort. Outputs are named `{cohort}_results__{model}__{ablation}.csv`. Use `--resume` to continue an interrupted run.
-4. `python src/concordant_check.py --model NAME` checks the LLM against the unanimous consensus on concordant cases (the sanity check for "resolve").
-5. `python src/evaluation_pipeline.py --model NAME [--ablation ...]` has the judge model in `config.yml` audit and score the discordant summaries. `--model` is the generation model being judged.
-6. `python src/semantic_entropy.py --model NAME [--limit N]` measures semantic entropy: 10 samples per case at temperature 1.0, clustered by bidirectional entailment using the judge model (or `--entailment deberta`). Then run `python src/semantic_entropy.py --model NAME --validate` to test whether entropy predicts wrong risk classes (concordant cohort) and poor judge scores (discordant cohort).
+Add the raw TCGA BRCA files to `data/raw/`:
 
-API keys can be set with `GENERATION_API_KEY` and `JUDGE_API_KEY` in `.env`, which override `api_key` in `config.yml`. Keep the judge model different from the generation model.
+- `Human__TCGA_BRCA__MS__Clinical__Clinical__01_28_2016__BI__Clinical__Firehose.tsi`
+- `Human__TCGA_BRCA__UNC__RNAseq__HiSeq_RNA__01_28_2016__BI__Gene__Firehose_RSEM_log2.cct`
+
+Retrieve these from https://linkedomics.org/data_download/TCGA-BRCA/ — download the Clinical and RNAseq (HiSeq, Gene level) datasets.
+
+Also put `ReactomePathways.gmt` in `data/raw/` — it's used by the generation pipeline to match a patient's upregulated genes to pathways.
+
+### 2. Python environment
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+On Windows, use PowerShell instead:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+If PowerShell blocks script execution, run `Set-ExecutionPolicy Unrestricted -Scope CurrentUser`, confirm with `Y`, and activate the environment again.
+
+### 3. R (required for `bioinformatics_pipeline.py`)
+
+The bioinformatics pipeline uses `rpy2` to call R's Bioconductor `genefu` package for the PAM50 Parker centroids. Install R from CRAN, then from the R console:
+
+```r
+if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
+BiocManager::install("genefu")
+```
+
+**Windows only:** `rpy2` may not find the R installation automatically. Set `R_HOME` and `PATH` in the Python file where `rpy2` is first imported (`src/classification_calculations.py`):
+
+```python
+import os
+
+r_home = r'C:\Program Files\R\R-4.x.x'
+os.environ['R_HOME'] = r_home
+
+r_dll_path = os.path.join(r_home, 'bin', 'x64')
+os.environ['PATH'] = r_dll_path + ';' + os.environ.get('PATH', '')
+
+import rpy2.robjects as robjects
+```
+
+Do not add `\bin` to `r_home`, and keep the `r` prefix so Python reads the Windows backslashes correctly.
+
+### 4. Model access
+
+Both the generation and judge stages talk to any OpenAI-compatible endpoint (LM Studio, OpenAI, vLLM, ...); `base_url`/`model_name` for each live in `config.yml`.
+
+Create a `.env` file in the project root:
+
+```bash
+GENERATION_API_KEY=your_key_here
+JUDGE_API_KEY=your_key_here
+```
+
+These override `api_key` in `config.yml` when set. With a local LM Studio server, `config.yml`'s default `api_key: "lmstudio"` is enough and `.env` can be left out. Keep the judge model different from the generation model to avoid self-preference bias. Never commit `.env`.
+
+## Running the pipelines
+
+All commands are run from the repository root, in this order.
+
+**1. Score signatures & build cohorts**
+```bash
+python src/bioinformatics_pipeline.py
+```
+Needs R + Bioconductor `genefu` via `rpy2`. Scores the eight signatures and writes the concordant, discordant and borderline case tables to `data/processed/` (`tcga_master_results.csv`, `tcga_discordant_cases.csv`, `tcga_concordant_cases.csv`), plus a signature correlation heatmap. The discordance margin is `bioinformatics.discordance_margin` in `config.yml`.
+
+**2. LLM arbitration**
+```bash
+python src/generation_pipeline.py --model NAME --limit 6
+```
+Quick test with 6 cases; use `--limit 0` for the full cohort, `--resume` to continue an interrupted run. `--ablation no_pathways|clinical_only|classes_only` exists but per [TODO.md](TODO.md) is being left out of the main flow for now. Outputs are written to `data/generation_outputs/` as `{cohort}_results__{model}__{ablation}.csv`.
+
+**3. Sanity check on concordant cases**
+```bash
+python src/concordant_check.py --model NAME
+```
+Checks the LLM against the unanimous consensus on concordant cases — the sanity check for "resolve".
+
+**4. Judge audit of discordant summaries**
+```bash
+python src/evaluation_pipeline.py --model NAME
+```
+The judge model from `config.yml` audits and scores the discordant summaries. `--model` is the generation model being judged, not the judge itself. Results go to `data/evaluation_outputs/`.
+
+**5. Semantic entropy (trust signal)**
+```bash
+python src/semantic_entropy.py --model NAME --limit N
+```
+10 samples per case at temperature 1.0, clustered by bidirectional entailment using the judge model (or `--entailment deberta`). Then run:
+```bash
+python src/semantic_entropy.py --model NAME --validate
+```
+to test whether entropy predicts wrong risk classes (concordant cohort) and poor judge scores (discordant cohort).
+
+`NAME` should match whichever model is loaded at `pipeline.base_url` in `config.yml`.
 
 ## What each part does
 
@@ -54,11 +150,31 @@ Ablations remove evidence blocks (`no_pathways`, `clinical_only`, `classes_only`
 
 Token-logprob confidence is switched off for now (commented out in the generation, concordant check and evaluation scripts).
 
+## Configuration notes
+
+- `config.yml` controls the active model names, base URLs, temperatures and thresholds for both the `pipeline` (generation) and `evaluation` (judge) stages.
+- `GENERATION_API_KEY` / `JUDGE_API_KEY` in `.env` override `api_key` in `config.yml` — set them when pointing at a hosted provider rather than a local server.
+- Keep the judge model different from the generation model to avoid self-preference bias.
+
+## Outputs
+
+After running the full workflow, you should have:
+
+- processed cohort tables (+ correlation heatmap) in `data/processed/`
+- LLM arbitration summaries in `data/generation_outputs/`
+- judge scores in `data/evaluation_outputs/`
+- semantic entropy results alongside the generation/evaluation outputs they were computed from
+
 ## Limitations
 - Discordant cases have no ground truth. "Resolve" is evaluated through the concordant benchmark, the stability of the call across samples and the judge's rating.
 - The judge is an LLM. Its scores are also the validation target for semantic entropy on discordant cases.
 - High and Low are relative to the cohort median, not absolute risk.
 - Oncotype DX, BCI and Mammostrat are approximations of the proprietary assays.
+
+## Notes
+- The notebooks in `notebooks/` are for exploration and visualisation.
+- The raw TCGA files and `ReactomePathways.gmt` are required before the bioinformatics/generation pipelines can run successfully.
+- Do not commit `.env` or the raw data files to GitHub.
 
 ## Repository Layout
 

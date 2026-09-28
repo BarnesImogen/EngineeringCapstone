@@ -1,7 +1,12 @@
 import re
+import yaml
 
 GENERATION_DIR = "data/generation_outputs"
 EVALUATION_DIR = "data/evaluation_outputs"
+
+def load_config(path="config.yml"):
+    with open(path, "r") as file:
+        return yaml.safe_load(file)
 
 def model_slug(model_name):
     """Filesystem-safe version of a model name (e.g. 'openai/gpt-oss-20b' -> 'openai-gpt-oss-20b')."""
