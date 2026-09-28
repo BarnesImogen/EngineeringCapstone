@@ -52,6 +52,7 @@ client = OpenAI(base_url=eval_base_url, api_key=eval_api_key)
 # ==========================================
 class GradingReport(BaseModel):
     # Field order matters: the model audits claims and writes each justification BEFORE committing to its score.
+    grounded_claims: list[str] = Field(description="Every specific claim in the AI output (gene, value, pathway, signature weight or mechanism) that IS supported by the provided context.")
     ungrounded_claims: list[str] = Field(description="Every specific claim in the AI output (gene, value, pathway, signature weight or mechanism) that is NOT supported by the provided context. Empty list if none.")
     biological_synthesis_justification: str = Field(description="Audit explaining the biological synthesis score, quoting the output and the context line checked.")
     biological_synthesis_score: int = Field(description="Integer score from 1 to 5.")
@@ -96,8 +97,8 @@ evaluator_instruction = inspect.cleandoc("""
     grounded even if it triggered no pathway entry. Signature weighting claims are grounded only if they match the
     Signature Definitions. Claims that are simply wrong (wrong value, wrong direction, wrong weight) are ungrounded.
 
-    STEP 1: List every ungrounded claim in `ungrounded_claims` (quote or paraphrase it precisely). Be exhaustive and
-    literal; do not list claims that are grounded.
+    STEP 1: List every specific claim in the output, sorting each into `grounded_claims` or `ungrounded_claims`
+    (quote or paraphrase it precisely). Be exhaustive and literal.
     STEP 2: For each domain write the justification first, quoting the output and the context line you checked, then
     give the score.
 
@@ -192,7 +193,10 @@ for index, row in df.iterrows():
 
         parsed_report = GradingReport.model_validate_json(response.choices[0].message.content)
         
+        n_grounded = len(parsed_report.grounded_claims)
         n_ungrounded = len(parsed_report.ungrounded_claims)
+        total_claims = n_grounded + n_ungrounded
+        hallucination_rate = (n_ungrounded / total_claims * 100) if total_claims > 0 else float("nan")
         bio_score = cap_biological_score(parsed_report.biological_synthesis_score, n_ungrounded)
 
         evaluation_results.append({
@@ -206,7 +210,10 @@ for index, row in df.iterrows():
             'active_pathways': active_pathways,
             generation_input_column: generated_text,
             # 'model_confidence_percent' / 'model_entropy_score' (logprobs) disabled for now
+            'grounded_claim_count': n_grounded,
             'ungrounded_claim_count': n_ungrounded,
+            'total_claims': total_claims,
+            'hallucination_rate': hallucination_rate,
             'ungrounded_claims': json.dumps(parsed_report.ungrounded_claims),
             'bio_synthesis_score': bio_score,
             'bio_synthesis_score_raw': parsed_report.biological_synthesis_score,
@@ -234,6 +241,12 @@ if not final_df.empty:
     print(f"Mean Biological Synthesis:     {final_df['bio_synthesis_score'].mean():.2f} / 5.0 (raw {final_df['bio_synthesis_score_raw'].mean():.2f})")
     print(f"Mean Ungrounded Claims:        {final_df['ungrounded_claim_count'].mean():.2f} per summary "
           f"({(final_df['ungrounded_claim_count'] > 0).mean() * 100:.1f}% of summaries have at least one)")
+    print(f"Mean Hallucination Rate:       {final_df['hallucination_rate'].mean():.2f}% per summary")
+    print(f"Median Hallucination Rate:     {final_df['hallucination_rate'].median():.2f}% per summary")
+    pooled_total_claims = final_df['total_claims'].sum()
+    pooled_ungrounded = final_df['ungrounded_claim_count'].sum()
+    pooled_rate = (pooled_ungrounded / pooled_total_claims * 100) if pooled_total_claims > 0 else float("nan")
+    print(f"Pooled Hallucination Rate:      {pooled_rate:.2f}% ({pooled_ungrounded}/{pooled_total_claims} claims across all patients)")
     print(f"Mean Systematic Reasoning:     {final_df['sys_reasoning_score'].mean():.2f} / 5.0")
     print(f"Mean Prognostic Resolution:    {final_df['prognostic_resolution_score'].mean():.2f} / 5.0")
 

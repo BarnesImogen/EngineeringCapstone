@@ -216,9 +216,6 @@ def calculate_kim10_tnbc_score(df):
     (0.231666 x LYST) + (1.305352 x NR6A1) + (-0.052086 x PYCARD) + 
     (-0.196973 x ROBO1) + (0.968759 x SLC22A20P) + (0.098331 x SLC24A3) + 
     (0.311646 x SLC45A4)
-    
-    Cut-off Value: 5.959715
-    High Risk: score > 5.959715
     """
     weights = KIM10_WEIGHTS
 
