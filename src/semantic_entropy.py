@@ -35,7 +35,7 @@ Usage (from the repository root):
   python src/semantic_entropy.py --model NAME [--cohorts concordant discordant] [--limit N]
   python src/semantic_entropy.py --model NAME --validate
   Options: --ablation, --num-generations 10, --temperature 1.0,
-           --entailment llm|deberta, --resume
+           --entailment llm|deberta, --strict, --resume
 """
 
 import argparse
@@ -205,7 +205,7 @@ class EntailmentDeberta:
         pass
 
 
-def get_semantic_ids(answers, entailment, question, strict=True):
+def get_semantic_ids(answers, entailment, question, strict=False):
     """Port of the repo's get_semantic_ids: compare each new answer to each cluster's first member."""
     def equivalent(a, b):
         forward = entailment.check_implication(a, b, question)
@@ -251,7 +251,7 @@ def score_row(row, cohort, args, gen_client, entailment):
     answers = [s["answer"] for s in samples if s["answer"]]
     if len(answers) < 2:
         raise ValueError(f"only {len(answers)} usable answers out of {len(samples)} samples")
-    ids = get_semantic_ids(answers, entailment, question, strict=not args.non_strict)
+    ids = get_semantic_ids(answers, entailment, question, strict=args.strict)
     majority_risk, majority_count = Counter(risks).most_common(1)[0]
     return {
         "patient_id": row["patient_id"],
@@ -389,7 +389,7 @@ if __name__ == "__main__":
     parser.add_argument("--top-p", type=float, default=0.9, help="Paper default: 0.9.")
     parser.add_argument("--entailment", choices=["llm", "deberta"], default="llm",
                         help="llm = judge model from config.yml; deberta = microsoft/deberta-v2-xlarge-mnli.")
-    parser.add_argument("--non-strict", action="store_true", help="Use the repo's looser equivalence rule.")
+    parser.add_argument("--strict", action="store_true", help="Use the paper's strict bidirectional-entailment rule instead of the repo's looser default.")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--validate", action="store_true", help="Compute AUROC from existing entropy and judge files.")
     args = parser.parse_args()
