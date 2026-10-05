@@ -8,17 +8,17 @@ import seaborn as sns
 sys.path.append(os.path.abspath('src'))
 
 from data_prep import load_and_merge_tcga
-from run_paths import load_config
-from signature_definitions import SIGNATURES
+from signature_definitions import SIGNATURES, PUBLISHED_CUTOFFS
 from classification_calculations import (
+    infer_er_status,
     calculate_oncotype_dx_score,
     calculate_pam50_score,
     calculate_bci_score,
     fetch_pam50_centroids,
-    calculate_mammostrat_score,
-    calculate_ihc4_score,
     calculate_irrs7_score,
-    calculate_hu11_irg_score
+    calculate_hu11_irg_score,
+    classify_by_cutoffs,
+    classify_by_tertiles,
 )
 
 def generate_correlation_heatmap(df, signatures, output_dir):
@@ -55,13 +55,34 @@ def generate_correlation_heatmap(df, signatures, output_dir):
     print(f"Heatmap saved to {heatmap_path}")
     plt.close()
 
-def load_discordance_margin(config_path="config.yml"):
-    """Fraction (0-0.5] of each signature's tails counted as clearly high/low; 0.5 reproduces the median split."""
-    config = load_config(config_path)
-    margin = float(config.get("bioinformatics", {}).get("discordance_margin", 1 / 3))
-    if not 0 < margin <= 0.5:
-        raise ValueError(f"discordance_margin must be in (0, 0.5], got {margin}")
-    return margin
+def assign_cohorts(class_df):
+    """Discordant: at least one signature High and at least one Low. Concordant: all High or all
+    Low. Borderline: everyone else, including all-Intermediate patients (the LLM's binary answer
+    would have nothing to be checked against)."""
+    is_high, is_low = class_df.eq('High'), class_df.eq('Low')
+    return pd.Series(np.select(
+        [is_high.any(axis=1) & is_low.any(axis=1), is_high.all(axis=1) | is_low.all(axis=1)],
+        ['discordant', 'concordant'],
+        default='borderline'
+    ), index=class_df.index)
+
+def expected_discordance(class_df):
+    """Discordance rate if the signatures were independent, given each one's class proportions:
+    1 - P(no High) - P(no Low) + P(all Intermediate)."""
+    p_high, p_low = class_df.eq('High').mean(), class_df.eq('Low').mean()
+    return 1 - np.prod(1 - p_high) - np.prod(1 - p_low) + np.prod(1 - p_high - p_low)
+
+def lone_dissenter(class_df):
+    """For each patient, the one signature that disagrees with all the others: High while every
+    other is Low or Intermediate, or Low while every other is High or Intermediate. Blank if
+    there is no such signature or more than one (one High, one Low, the rest Intermediate)."""
+    lone = pd.DataFrame({
+        sig: (class_df[sig].eq('High') & class_df.drop(columns=sig).ne('High').all(axis=1))
+             | (class_df[sig].eq('Low') & class_df.drop(columns=sig).ne('Low').all(axis=1))
+        for sig in class_df.columns
+    })
+    unique = lone.sum(axis=1) == 1
+    return pd.Series(np.where(unique, lone.idxmax(axis=1), ""), index=class_df.index)
 
 def run_pipeline():    
     rna_file = "data/raw/Human__TCGA_BRCA__UNC__RNAseq__HiSeq_RNA__01_28_2016__BI__Gene__Firehose_RSEM_log2.cct" 
@@ -77,24 +98,38 @@ def run_pipeline():
     master_df = load_and_merge_tcga(rna_file, clinical_file)
     print(f"Loaded master dataset: {master_df.shape[0]} patients.")
 
+    # Clinical ER status is recorded for only ~10% of patients, so PAM50 centring and the BCI
+    # reference set use ER status inferred from (bimodal) ESR1 expression for everyone.
+    print("\nInferring ER status from ESR1 expression...")
+    master_df['ER_Status_Inferred'], er_threshold, er_antimode = infer_er_status(master_df['ESR1'])
+    print(f"  Mixture threshold: ESR1 >= {er_threshold:.2f} (antimode {er_antimode:.2f})")
+    print("  " + master_df['ER_Status_Inferred'].value_counts().to_string().replace("\n", "\n  "))
+    known = master_df['ER.Status'].isin(['Positive', 'Negative'])
+    agreement = (master_df.loc[known, 'ER.Status'] == master_df.loc[known, 'ER_Status_Inferred']).mean()
+    print(f"  Agreement with clinical ER status: {agreement*100:.1f}% (n={known.sum()})")
+    print(pd.crosstab(master_df.loc[known, 'ER.Status'], master_df.loc[known, 'ER_Status_Inferred'],
+                      rownames=['clinical'], colnames=['inferred']).to_string())
+
     # Calculate Continuous Scores
     print("\nCalculating Continuous Risk Scores...")
     print("Fetching PAM50 Centroids from R...")
     pam50_centroids = fetch_pam50_centroids()
     
     print("Executing all mathematical models...")
-    master_df['OncotypeDX_Score'] = calculate_oncotype_dx_score(master_df)
-    master_df['Pam50_Subtype'], master_df['Pam50_Score'] = calculate_pam50_score(master_df, pam50_centroids)
-    master_df['BCI_Score'] = calculate_bci_score(master_df)
-    master_df['Mammostrat_Score'] = calculate_mammostrat_score(master_df)
-    master_df['IHC4_Score'] = calculate_ihc4_score(master_df)
+    # Oncotype DX: the unbounded RSU is the score; the bounded RS is kept for reference
+    master_df['OncotypeDX_Score'], master_df['OncotypeDX_RS'] = calculate_oncotype_dx_score(master_df)
+    # Sensitivity version: genes rescaled on the 1st-99th percentile instead of min-max
+    master_df['OncotypeDX_Score_P1_99'], _ = calculate_oncotype_dx_score(master_df, scaling="p1_99")
+    master_df['Pam50_Subtype'], master_df['Pam50_Score'] = calculate_pam50_score(
+        master_df, pam50_centroids, master_df['ER_Status_Inferred'])
+    master_df['BCI_Score'] = calculate_bci_score(master_df, master_df['ER_Status_Inferred'])
     master_df['IRRS7_Score'] = calculate_irrs7_score(master_df)
     master_df['Hu11_Score'] = calculate_hu11_irg_score(master_df)
 
-    # Stratify into Binary Classes
+    # Stratify into Risk Classes
     signatures = [key for key, _ in SIGNATURES]
 
-    # A NaN score would otherwise compare False against the median and be labelled Low Risk,
+    # A NaN score would otherwise compare False against every cutoff and be labelled High,
     # so drop patients without a complete set of scores.
     score_cols = [f'{sig}_Score' for sig in signatures]
     master_df[score_cols] = master_df[score_cols].apply(pd.to_numeric, errors='coerce')
@@ -107,63 +142,63 @@ def run_pipeline():
         raise ValueError("All patients were dropped for missing signature scores; check the per-signature counts above.")
     print(f"\nDropped {n_before - len(master_df)} patients with missing signature scores ({len(master_df)} remain).")
 
-    print("\nStratifying Patients (Median Split)...")
+    # PAM50 and BCI use their published cutoffs; Oncotype DX (on RSU), IRRS-7 and Hu-11 use cohort tertiles.
+    # {sig}_Class_Median keeps the old 0/1 median split for sensitivity analysis.
+    print("\nStratifying Patients (Low / Intermediate / High)...")
 
     for sig in signatures:
         score_col = f'{sig}_Score'
         class_col = f'{sig}_Class'
-        median_val = master_df[score_col].median()
-        master_df[class_col] = (master_df[score_col] > median_val).astype(int)
-        
-        high_risk_count = master_df[class_col].sum()
-        low_risk_count = (master_df[class_col] == 0).sum()
-        print(f"  - {sig}: Cut-off {median_val:.4f} | High: {high_risk_count}, Low: {low_risk_count}")
+        if sig in PUBLISHED_CUTOFFS:
+            master_df[class_col] = classify_by_cutoffs(master_df[score_col], PUBLISHED_CUTOFFS[sig])
+            rule = f"published cutoffs {PUBLISHED_CUTOFFS[sig]}"
+        else:
+            master_df[class_col] = classify_by_tertiles(master_df[score_col])
+            rule = "cohort tertiles"
+        master_df[f'{class_col}_Median'] = (master_df[score_col] > master_df[score_col].median()).astype(int)
+
+        counts = master_df[class_col].value_counts()
+        print(f"  - {sig} ({rule}): " + ", ".join(f"{c}: {counts.get(c, 0)}" for c in ['Low', 'Intermediate', 'High']))
 
     # Detect Discordance
     print("\nAnalysing Cohort Discordance...")
-    class_columns = [f'{sig}_Class' for sig in signatures]
+    class_df = master_df[[f'{sig}_Class' for sig in signatures]].rename(columns=lambda c: c.removesuffix('_Class'))
     total_patients = len(master_df)
 
-    # Any disagreement across the median-split classes (the original, noisy definition)
-    master_df['Is_Discordant_Median'] = master_df[class_columns].nunique(axis=1) > 1
+    # Primary: all five signatures. Sensitivity: the four without Hu-11.
+    master_df['Discordance_Group'] = assign_cohorts(class_df)
+    master_df['Discordance_Group_No_Hu11'] = assign_cohorts(class_df.drop(columns='Hu11'))
+    master_df['Consensus_Risk'] = np.where(master_df['Discordance_Group'] != 'concordant', None,
+                                           np.where(class_df.eq('High').all(axis=1), 'High Risk', 'Low Risk'))
 
-    # Margin rule: within each signature a patient is "clearly high" in the top `margin` fraction
-    # of the cohort and "clearly low" in the bottom `margin` fraction. Discordant = at least one
-    # signature clearly high AND at least one clearly low.
-    margin = load_discordance_margin()
-    pct_rank = master_df[[f'{sig}_Score' for sig in signatures]].rank(pct=True)
-    clearly_high = (pct_rank > 1 - margin).any(axis=1)
-    clearly_low = (pct_rank <= margin).any(axis=1)
-    master_df['Is_Discordant'] = clearly_high & clearly_low
+    for label, group_col, classes in [("Five signatures", 'Discordance_Group', class_df),
+                                      ("Without Hu-11", 'Discordance_Group_No_Hu11', class_df.drop(columns='Hu11'))]:
+        groups = master_df[group_col]
+        n_all_high = (groups.eq('concordant') & classes.eq('High').all(axis=1)).sum()
+        print(f"{label}:")
+        print(f"  Discordance (>=1 High and >=1 Low):  {groups.eq('discordant').mean()*100:.1f}%")
+        print(f"  Expected under independent signatures: {expected_discordance(classes)*100:.1f}%")
+        for group in ['concordant', 'discordant', 'borderline']:
+            n = groups.eq(group).sum()
+            extra = f" (High {n_all_high}, Low {n - n_all_high})" if group == 'concordant' else ""
+            print(f"    - {group}: {n} ({n/total_patients*100:.1f}%){extra}")
+        print(f"    (all-Intermediate patients, counted as borderline: {classes.eq('Intermediate').all(axis=1).sum()})")
 
-    # Patients who disagree by the median split but have no clear-cut conflict are borderline:
-    # excluded from both the concordant and discordant sets.
-    master_df['Discordance_Group'] = np.select(
-        [master_df['Is_Discordant'], ~master_df['Is_Discordant_Median']],
-        ['discordant', 'concordant'],
-        default='borderline'
-    )
-
-    n_signatures = len(signatures)
-    expected_independent = 1 - 2 * (1 - margin) ** n_signatures + (1 - 2 * margin) ** n_signatures
-    counts = master_df['Discordance_Group'].value_counts()
-    print(f"Margin: top/bottom {margin:.1%} of each signature counts as clearly high/low.")
-    print(f"Median-split discordance (any disagreement): {master_df['Is_Discordant_Median'].mean()*100:.1f}%")
-    print(f"Margin-rule discordance:                     {master_df['Is_Discordant'].mean()*100:.1f}%")
-    print(f"Expected under independent signatures:       {expected_independent*100:.1f}%")
-    for group in ['concordant', 'discordant', 'borderline']:
-        n = counts.get(group, 0)
-        print(f"  - {group}: {n} ({n/total_patients*100:.1f}%)")
+    # Discordant patients where one signature alone takes the opposite side
+    is_discordant = master_df['Discordance_Group'] == 'discordant'
+    master_df['Lone_Dissenter'] = ""
+    master_df.loc[is_discordant, 'Lone_Dissenter'] = lone_dissenter(class_df[is_discordant])
+    dissenters = master_df.loc[is_discordant, 'Lone_Dissenter']
+    print(f"\nDiscordant patients with a lone dissenting signature: {(dissenters != '').sum()} of {is_discordant.sum()}")
+    for sig in signatures:
+        print(f"  - {sig}: {(dissenters == sig).sum()}")
 
     # Data Partitioning for Export
     print("\nExporting Results...")
     
-    # Isolate Discordant Cases (margin rule)
+    # Generation and evaluation use the five-signature cohorts
     discordant_df = master_df[master_df['Discordance_Group'] == 'discordant'].copy()
-    
-    # Isolate Concordant Cases (all seven median-split classes agree) and add a consensus label
     concordant_df = master_df[master_df['Discordance_Group'] == 'concordant'].copy()
-    concordant_df['Consensus_Risk'] = concordant_df['OncotypeDX_Class'].map({1: 'High Risk', 0: 'Low Risk'})
     
     # Export to CSV
     master_path = os.path.join(output_dir, "tcga_master_results.csv")

@@ -52,9 +52,9 @@ evaluator_instruction = inspect.cleandoc("""
     Your role is to audit and evaluate AI summaries generated to resolve discordant multi-gene prognostic risk signatures.
 
     You will be provided with:
-    1. The FULL CONTEXT given to the AI during generation: Signature Definitions (gene sets and weights for each
-       algorithm), Clinical Metadata, Algorithmic Risk Classifications, Transcriptomic Profile, and Verified Active
-       Pathways. This is everything the AI actually saw.
+    1. The FULL CONTEXT given to the AI during generation: Signature Definitions (gene sets, formulas, weights and
+       class cutoffs for each algorithm), Clinical Metadata, Algorithmic Risk Classifications (Low / Intermediate /
+       High), Transcriptomic Profile, and Verified Active Pathways. This is everything the AI actually saw.
     2. The AI'S GENERATED OUTPUT.
 
     Some context sections may be marked "Not provided to the AI in this run". That is intentional. Missing evidence is
@@ -65,6 +65,14 @@ evaluator_instruction = inspect.cleandoc("""
     that appears in the FULL CONTEXT and is stated correctly. A gene mentioned with its correct expression value is
     grounded even if it triggered no pathway entry. Signature weighting claims are grounded only if they match the
     Signature Definitions. Claims that are simply wrong (wrong value, wrong direction, wrong weight) are ungrounded.
+    In particular, each of these is UNGROUNDED: a misquoted formula, coefficient or cutoff (e.g. a wrong class
+    threshold, or claiming a tertile signature uses a fixed published cutoff); a signature's class stated wrongly
+    (e.g. calling a signature High when the classifications list it as Intermediate).
+
+    INTERMEDIATE CLASSES: a signature classified Intermediate does not take a side; it supports neither High nor
+    Low risk. The conflict is between the High and the Low signatures. Treating an Intermediate signature as
+    evidence for High or Low, or counting it as one of the conflicting algorithms, is a reasoning error. The AI must
+    still give a binary final call (High Risk or Low Risk) regardless of how many signatures are Intermediate.
 
     STEP 1: List every specific claim in the output, sorting each into `grounded_claims` or `ungrounded_claims`
     (quote or paraphrase it precisely). Be exhaustive and literal.
@@ -82,11 +90,12 @@ evaluator_instruction = inspect.cleandoc("""
        Cap: 1 to 2 ungrounded claims means the score cannot exceed 3; 3 or more means it cannot exceed 2.
 
     2. Systematic Reasoning (Mechanistic Root-Cause Analysis):
-       * Score 1: Fails to explain why the signatures disagree, or makes contradictory logical leaps.
-       * Score 2: Restates that signatures disagree without a mechanism.
+       * Score 1: Fails to explain why the High and Low signatures disagree, or makes contradictory logical leaps.
+       * Score 2: Restates that signatures disagree without a mechanism, or misreads which signatures conflict
+         (e.g. treats an Intermediate signature as High or Low).
        * Score 3: Superficial explanation of discordance, not tied to specific weights or expression levels.
        * Score 4: Explains the disagreement using specific weights or gene sets from the Signature Definitions, but only partly anchored in the patient's values.
-       * Score 5: Identifies the specific mechanistic root cause (e.g. which weighted gene groups push each signature in opposite directions) using the Signature Definitions and anchored in the patient's own evidence.
+       * Score 5: Identifies the specific mechanistic root cause (e.g. which weighted gene groups push the High and the Low signatures in opposite directions) using the Signature Definitions and anchored in the patient's own evidence.
 
     3. Prognostic Resolution (Conflict Arbitration):
        * Score 1: No final risk consensus, or arbitrarily picks a side without linking it to the reasoning.
@@ -159,7 +168,7 @@ def run_evaluation(generated_by, ablation):
             {signature_reference}
             Clinical Metadata:
             {clinical_data}
-            Conflicting Algorithmic Risk Classifications (1 = High Risk, 0 = Low Risk):
+            Algorithmic Risk Classifications (Low / Intermediate / High; Intermediate means the signature does not take a side):
             {signature_classifications}
             Transcriptomic Profile (Key Biomarkers & Expression Levels):
             {transcriptomic_data}

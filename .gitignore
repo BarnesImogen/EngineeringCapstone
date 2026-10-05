@@ -4,19 +4,15 @@ env/
 __pycache__/
 .env
 
-# Keep the data directory structure, but ignore files inside each folder.
-data/raw/*
-!data/raw/.gitkeep
-data/processed/*
-!data/processed/.gitkeep
-data/generation_outputs/*
-!data/generation_outputs/.gitkeep
-data/evaluation_outputs/*
-!data/evaluation_outputs/.gitkeep
-!data/raw/.gitkeep
-!data/processed/
-!data/processed/.gitkeep
-!data/generation_outputs/
-!data/generation_outputs/.gitkeep
-!data/evaluation_outputs/
-!data/evaluation_outputs/.gitkeep
+# Ignore everything in data/, but keep the folder structure via .gitkeep files.
+data/**
+!data/**/
+!data/**/.gitkeep
+
+TODO.md
+
+# Capstone report (LaTeX sources, figures, Overleaf export)
+report/
+
+# Local snapshots of pipeline outputs, diffs and prompts (not for version control)
+.archive/

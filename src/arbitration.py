@@ -32,6 +32,12 @@ ABLATIONS = {
     "classes_only":  {"clinical": False, "expression": False, "pathways": False},
 }
 
+# Shown with the signature classes in every prompt (and so in the semantic-entropy evidence too)
+CLASS_LEGEND = (
+    "Each signature places the patient in Low, Intermediate or High risk. Intermediate means that signature "
+    "does not take a side; it supports neither High nor Low risk."
+)
+
 FINAL_RESOLUTION_PATTERN = re.compile(r"FINAL RESOLUTION:\s*\**\s*(High|Low)\s+Risk", re.IGNORECASE)
 
 def parse_final_resolution(text):
@@ -40,6 +46,15 @@ def parse_final_resolution(text):
     if not matches:
         return None
     return f"{matches[-1].capitalize()} Risk"
+
+def majority_vote(classes):
+    """High against Low calls across signature classes, ignoring Intermediate: 'High Risk',
+    'Low Risk', or 'Tie' when the counts are equal (including all Intermediate)."""
+    classes = list(classes)
+    n_high, n_low = classes.count("High"), classes.count("Low")
+    if n_high == n_low:
+        return "Tie"
+    return "High Risk" if n_high > n_low else "Low Risk"
 
 def build_prompt(patient_id, clinical_data, signature_classifications, transcriptomic_data, active_pathways, ablation="full"):
     include = ABLATIONS[ablation]
@@ -52,8 +67,8 @@ def build_prompt(patient_id, clinical_data, signature_classifications, transcrip
     # Static description of the algorithms; shown in every ablation because it is not patient data
     sections.append(f"--- Signature Definitions (how each algorithm scores a patient) ---\n{get_signature_reference_text()}")
     sections.append(
-        "--- Conflicting Algorithmic Risk Classifications (1 = High Risk, 0 = Low Risk) ---\n"
-        f"{signature_classifications}"
+        "--- Algorithmic Risk Classifications (Low / Intermediate / High) ---\n"
+        f"{CLASS_LEGEND}\n{signature_classifications}"
     )
     if include["expression"]:
         sections.append(f"--- Transcriptomic Profile (Key Biomarkers & Expression Levels) ---\n{transcriptomic_data}")
@@ -63,12 +78,14 @@ def build_prompt(patient_id, clinical_data, signature_classifications, transcrip
     evidence = "the Signature Definitions and the provided pathways" if include["pathways"] else "the Signature Definitions and the provided evidence"
     sections.append(
         "REQUIRED ARBITRATION STEPS:\n"
-        "1. Conflict Diagnosis: Explicitly state WHICH algorithms are conflicting.\n"
+        "1. Conflict Diagnosis: Explicitly state WHICH algorithms are conflicting (the High against the Low "
+        "classifications; Intermediate signatures do not take a side).\n"
         f"2. Mechanistic Root Cause: Using {evidence}, explain EXACTLY why the algorithms disagreed based on how they mathematically weight different biomarkers.\n"
         "3. Prognostic Resolution: Deliver a final, tie-breaking risk classification based on the biological evidence provided."
     )
     sections.append(
-        "IMPORTANT: Conclude your text with this exact phrase:\n"
+        "IMPORTANT: Your final classification must be binary even if some signatures are Intermediate. "
+        "Conclude your text with exactly one of these phrases:\n"
         "FINAL RESOLUTION: High Risk\n"
         "or\n"
         "FINAL RESOLUTION: Low Risk"

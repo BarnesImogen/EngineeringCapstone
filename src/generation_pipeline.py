@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 import argparse
 from run_paths import generation_path, load_config
 from signature_definitions import get_all_signature_genes, SIGNATURES
-from arbitration import SYSTEM_INSTRUCTION, ABLATIONS, build_prompt, parse_final_resolution
+from arbitration import SYSTEM_INSTRUCTION, ABLATIONS, build_prompt, parse_final_resolution, majority_vote
 
 load_dotenv()
 
@@ -153,41 +153,57 @@ def generate_patient_summary(patient_id, clinical_data, signature_classification
 # ==========================================
 # 6. Data Ingestion & Batch Execution
 # ==========================================
+CLINICAL_FIELDS = [
+    ("years_to_birth", "Age at diagnosis"),
+    ("ER.Status", "ER status"),
+    ("pathologic_stage", "Pathologic stage"),
+    ("pathology_T_stage", "T stage"),
+    ("pathology_N_stage", "N stage (nodal status)"),
+    ("pathology_M_stage", "M stage"),
+    ("histological_type", "Histological type"),
+    ("number_of_lymph_nodes", "Positive lymph nodes"),
+    ("PR.Status", "PR status"),
+    ("HER2.Status", "HER2 status"),
+]
+
+SIG_COLUMNS = [(key, label, f"{key}_Class") for key, label in SIGNATURES]
+
+def load_cohort(input_filename):
+    df = pd.read_csv(input_filename, low_memory=False)
+    if "Unnamed: 0" in df.columns:
+        df = df.rename(columns={"Unnamed: 0": "patient_id"})
+    return df
+
+def load_gene_medians(df, available_tx_cols, input_filename):
+    # Medians come from the full cohort so "upregulated" means the same thing for concordant and discordant cases
+    if os.path.exists(MASTER_FILE):
+        return pd.read_csv(MASTER_FILE, usecols=available_tx_cols).median()
+    print(f"[WARNING] {MASTER_FILE} not found; falling back to medians from {input_filename} only.")
+    return df[available_tx_cols].median()
+
+def build_case_context(row, available_tx_cols, gene_medians):
+    """The evidence blocks for one patient: (clinical, signature classes, transcriptomics, Reactome pathways)."""
+    clinical_meta = "\n".join(f"{label}: {row[col]}" for col, label in CLINICAL_FIELDS if col in row and pd.notna(row[col]))
+    sig_classifications = "\n".join(f"{label}: {row[col]}" for _, label, col in SIG_COLUMNS if col in row and pd.notna(row[col]))
+    transcriptomics = "\n".join(f"{gene}: {row[gene]:.4f}" if isinstance(row[gene], (float, int)) else f"{gene}: {row[gene]}" for gene in available_tx_cols if pd.notna(row[gene]))
+
+    # Identify upregulated genes
+    upregulated_genes = [gene for gene in available_tx_cols if pd.notna(row[gene]) and row[gene] > gene_medians[gene]]
+
+    # Get Reactome pathways for the upregulated genes
+    extracted_pathways_str = get_reactome_active_pathways(upregulated_genes, REACTOME_INDEX)
+    return clinical_meta, sig_classifications, transcriptomics, extracted_pathways_str
+
 def process_cohort(input_filename, output_filename, ablation="full", limit=DEFAULT_LIMIT, resume=False):
     if not os.path.exists(input_filename):
         print(f"File not found: {input_filename}. Skipping cohort.")
         return
 
-    df = pd.read_csv(input_filename, low_memory=False)
-    if "Unnamed: 0" in df.columns:
-        df = df.rename(columns={"Unnamed: 0": "patient_id"})
-
-    sig_columns = [(label, f"{key}_Class") for key, label in SIGNATURES]
+    df = load_cohort(input_filename)
 
     # Every gene symbol used by any signature (single source of truth: signature_definitions.py)
-    transcriptomic_columns = get_all_signature_genes()
-
-    clinical_fields = [
-        ("years_to_birth", "Age at diagnosis"),
-        ("ER.Status", "ER status"),
-        ("pathologic_stage", "Pathologic stage"),
-        ("pathology_T_stage", "T stage"),
-        ("pathology_N_stage", "N stage (nodal status)"),
-        ("pathology_M_stage", "M stage"),
-        ("histological_type", "Histological type"),
-        ("number_of_lymph_nodes", "Positive lymph nodes"),
-        ("PR.Status", "PR status"),
-        ("HER2.Status", "HER2 status"),
-    ]
-
-    available_tx_cols = [g for g in transcriptomic_columns if g in df.columns]
-
-    # Medians come from the full cohort so "upregulated" means the same thing for concordant and discordant cases
-    if os.path.exists(MASTER_FILE):
-        gene_medians = pd.read_csv(MASTER_FILE, usecols=available_tx_cols).median()
-    else:
-        print(f"[WARNING] {MASTER_FILE} not found; falling back to medians from {input_filename} only.")
-        gene_medians = df[available_tx_cols].median()
+    available_tx_cols = [g for g in get_all_signature_genes() if g in df.columns]
+    gene_medians = load_gene_medians(df, available_tx_cols, input_filename)
 
     # limit=0 runs the entire cohort
     sample_df = df if limit == 0 else df.head(limit)
@@ -217,15 +233,8 @@ def process_cohort(input_filename, output_filename, ablation="full", limit=DEFAU
             continue
         print(f"[{position}/{n_total}] Processing Patient: {p_id}...")
 
-        clinical_meta = "\n".join(f"{label}: {row[col]}" for col, label in clinical_fields if col in row and pd.notna(row[col]))
-        sig_classifications = "\n".join(f"{label}: {row[col]}" for label, col in sig_columns if col in row and pd.notna(row[col]))
-        transcriptomics = "\n".join(f"{gene}: {row[gene]:.4f}" if isinstance(row[gene], (float, int)) else f"{gene}: {row[gene]}" for gene in available_tx_cols if pd.notna(row[gene]))
-
-        # Identify upregulated genes
-        upregulated_genes = [gene for gene in available_tx_cols if pd.notna(row[gene]) and row[gene] > gene_medians[gene]]
-        
-        # Get Reactome pathways for the upregulated genes
-        extracted_pathways_str = get_reactome_active_pathways(upregulated_genes, REACTOME_INDEX)
+        clinical_meta, sig_classifications, transcriptomics, extracted_pathways_str = build_case_context(
+            row, available_tx_cols, gene_medians)
 
         final_risk, summary = generate_patient_summary(
             patient_id=p_id,
@@ -241,6 +250,9 @@ def process_cohort(input_filename, output_filename, ablation="full", limit=DEFAU
         record.update({
             'ablation': ablation,
             'final_risk_class': final_risk,
+            # Simple baselines to compare the model's call against: High vs Low counts, Intermediate ignored
+            'majority_vote': majority_vote(row[col] for _, _, col in SIG_COLUMNS),
+            'majority_vote_without_hu11': majority_vote(row[col] for key, _, col in SIG_COLUMNS if key != "Hu11"),
             # 'model_confidence_percent', 'model_entropy_score', 'decision_token_confidence',
             # 'min_token_confidence' and 'weakest_token' (logprob fields) are disabled for now.
             'clinical_data': clinical_meta if include["clinical"] else "",

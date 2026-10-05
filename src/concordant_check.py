@@ -24,7 +24,7 @@ def save_summary(row):
     new.to_csv(SUMMARY_PATH, index=False)
     print(f"\nSummary saved to {SUMMARY_PATH}")
 
-# Sanity check: on concordant cases all seven signatures agree, so the correct label is known.
+# Sanity check: on concordant cases all five signatures are High (or all five Low), so the correct label is known.
 # Usage: python src/concordant_check.py [--model NAME] [--ablation full|no_pathways|...]
 
 def run_concordant_check(model, ablation="full"):
