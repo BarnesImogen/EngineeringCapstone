@@ -17,7 +17,6 @@ from classification_calculations import (
     fetch_pam50_centroids,
     calculate_mammostrat_score,
     calculate_ihc4_score,
-    calculate_kim10_tnbc_score,
     calculate_irrs7_score,
     calculate_hu11_irg_score
 )
@@ -54,7 +53,7 @@ def generate_correlation_heatmap(df, signatures, output_dir):
     heatmap_path = os.path.join(output_dir, "signature_correlation_heatmap.png")
     plt.savefig(heatmap_path, dpi=300)
     print(f"Heatmap saved to {heatmap_path}")
-    plt.show()
+    plt.close()
 
 def load_discordance_margin(config_path="config.yml"):
     """Fraction (0-0.5] of each signature's tails counted as clearly high/low; 0.5 reproduces the median split."""
@@ -89,7 +88,6 @@ def run_pipeline():
     master_df['BCI_Score'] = calculate_bci_score(master_df)
     master_df['Mammostrat_Score'] = calculate_mammostrat_score(master_df)
     master_df['IHC4_Score'] = calculate_ihc4_score(master_df)
-    master_df['Kim10_Score'] = calculate_kim10_tnbc_score(master_df)
     master_df['IRRS7_Score'] = calculate_irrs7_score(master_df)
     master_df['Hu11_Score'] = calculate_hu11_irg_score(master_df)
 
@@ -163,9 +161,9 @@ def run_pipeline():
     # Isolate Discordant Cases (margin rule)
     discordant_df = master_df[master_df['Discordance_Group'] == 'discordant'].copy()
     
-    # Isolate Concordant Cases (all eight median-split classes agree) and add a consensus label
+    # Isolate Concordant Cases (all seven median-split classes agree) and add a consensus label
     concordant_df = master_df[master_df['Discordance_Group'] == 'concordant'].copy()
-    concordant_df['Consensus_Risk'] = concordant_df['Kim10_Class'].map({1: 'High Risk', 0: 'Low Risk'})
+    concordant_df['Consensus_Risk'] = concordant_df['OncotypeDX_Class'].map({1: 'High Risk', 0: 'Low Risk'})
     
     # Export to CSV
     master_path = os.path.join(output_dir, "tcga_master_results.csv")

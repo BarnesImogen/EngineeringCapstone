@@ -2,7 +2,7 @@
 
 **Research question:** Can large language models be used to resolve and interpret conflicting prognostic gene expression classifications in breast invasive carcinoma?
 
-This project takes TCGA-BRCA patients on whom eight published gene expression signatures disagree, asks an LLM to arbitrate the conflict, and measures how well it does. *Resolve* means reaching a definitive High or Low Risk call. *Interpret* means explaining, from the patient's own data, why the signatures disagree.
+This project takes TCGA-BRCA patients on whom seven published gene expression signatures disagree, asks an LLM to arbitrate the conflict, and measures how well it does. *Resolve* means reaching a definitive High or Low Risk call. *Interpret* means explaining, from the patient's own data, why the signatures disagree.
 
 ## How the question is answered
 
@@ -90,7 +90,7 @@ All commands are run from the repository root, in this order.
 ```bash
 python src/bioinformatics_pipeline.py
 ```
-Needs R + Bioconductor `genefu` via `rpy2`. Scores the eight signatures and writes the concordant, discordant and borderline case tables to `data/processed/` (`tcga_master_results.csv`, `tcga_discordant_cases.csv`, `tcga_concordant_cases.csv`), plus a signature correlation heatmap. The discordance margin is `bioinformatics.discordance_margin` in `config.yml`.
+Needs R + Bioconductor `genefu` via `rpy2`. Scores the seven signatures and writes the concordant, discordant and borderline case tables to `data/processed/` (`tcga_master_results.csv`, `tcga_discordant_cases.csv`, `tcga_concordant_cases.csv`), plus a signature correlation heatmap. The discordance margin is `bioinformatics.discordance_margin` in `config.yml`.
 
 **2. LLM arbitration**
 ```bash
@@ -126,15 +126,15 @@ to test whether entropy predicts wrong risk classes (concordant cohort) and poor
 
 ### Building the conflict
 - `data_prep.py` loads and merges the TCGA-BRCA RNA-seq and clinical files (primary tumours only, one row per patient).
-- `signature_definitions.py` holds the gene sets and weights for the eight signatures (Oncotype DX, PAM50, Breast Cancer Index, Mammostrat, IHC4, Kim-10, IRRS-7, Hu-11). It is the single source of truth for both the scoring code and the prompts, so the LLM is told exactly what was computed.
-- `classification_calculations.py` computes each signature's continuous score. PAM50 uses the Parker centroids from the R `genefu` package. Oncotype DX, BCI and Mammostrat are research re-implementations, not the proprietary assays.
+- `signature_definitions.py` holds the gene sets and weights for the seven signatures (Oncotype DX, PAM50, Breast Cancer Index, Mammostrat, IHC4, IRRS-7, Hu-11). It is the single source of truth for both the scoring code and the prompts, so the LLM is told exactly what was computed.
+- `classification_calculations.py` computes each signature's continuous score. PAM50 uses the Parker centroids from the R `genefu` package; a handful of signature genes (PAM50's CDCA1/KNTC2, Mammostrat's TRMT10C) are listed in the source literature under symbols the RNA-seq file doesn't use, so `signature_definitions.py` aliases them to the matching column (NUF2, NDC80, HTF9C/RG9MTD1) — the same gene name is then used consistently in the prompts, the judge context and the scoring. Oncotype DX, BCI and Mammostrat are research re-implementations, not the proprietary assays. Oncotype DX also normalises every gene against the mean of five reference genes (ACTB, GAPDH, GUSB, RPLP0, TFRC) before scoring, per the published assay (Paik et al., 2004).
 - `bioinformatics_pipeline.py` median-splits each score into High (1) or Low (0), then defines the cohorts:
   - **Discordant:** at least one signature puts the patient in its top `margin` fraction and another puts them in its bottom `margin` fraction (a clear-cut conflict, not noise near the median).
-  - **Concordant:** all eight median-split classes agree. The shared class is the known answer (`Consensus_Risk`).
+  - **Concordant:** all seven median-split classes agree. The shared class is the known answer (`Consensus_Risk`).
   - **Borderline:** mild disagreement only; excluded from both.
 
 ### Resolving and interpreting: the LLM arbitrator
-`generation_pipeline.py` builds one prompt per patient from the clinical metadata, the signature definitions, the eight conflicting classes, the expression values and Reactome pathways matched to the patient's upregulated genes. The model works through three steps: Conflict Diagnosis, Mechanistic Root Cause (interpret) and Prognostic Resolution (resolve). A system prompt restricts it to the supplied evidence. The output is extracted into a validated JSON schema.
+`generation_pipeline.py` builds one prompt per patient from the clinical metadata, the signature definitions, the seven conflicting classes, the expression values and Reactome pathways matched to the patient's upregulated genes. The model works through three steps: Conflict Diagnosis, Mechanistic Root Cause (interpret) and Prognostic Resolution (resolve). A system prompt restricts it to the supplied evidence. The output is extracted into a validated JSON schema.
 
 Ablations remove evidence blocks (`no_pathways`, `clinical_only`, `classes_only`) to test what the model needs to see in order to interpret conflicts well.
 

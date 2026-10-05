@@ -1,4 +1,4 @@
-"""Gene sets and weights for the eight signatures.
+"""Gene sets and weights for the seven signatures.
 
 Single source of truth: classification_calculations.py scores patients with these, and the
 generation/judge prompts describe them, so the model is told exactly what was computed.
@@ -13,17 +13,29 @@ ONCOTYPE_GROUPS = {
     "Invasion group":      (["MMP11", "CTSL2"], 0.10),
 }
 ONCOTYPE_SINGLE_GENES = {"CD68": 0.05, "GSTM1": -0.08, "BAG1": -0.07}
+# Reference genes the published assay normalises every Oncotype gene against before scoring
+# (Paik et al., 2004). Not part of the transcriptomic profile shown to the LLM: they carry no
+# risk signal on their own.
+ONCOTYPE_REFERENCE_GENES = ["ACTB", "GAPDH", "GUSB", "RPLP0", "TFRC"]
 
-# PAM50 (Parker et al., 2009): nearest-centroid subtype on these 50 genes
+# PAM50 (Parker et al., 2009): nearest-centroid subtype on these 50 genes.
+# NUF2 and NDC80 are listed under their published symbols (CDCA1, KNTC2) in the genefu
+# centroid matrix; PAM50_ALIASES maps the centroid row names to these RNA-seq column names.
 PAM50_GENES = [
     "ACTR3B", "ANLN", "BAG1", "BCL2", "BIRC5", "BLVRA", "CCNB1", "CCNE1",
-    "CDC20", "CDC6", "CDCA1", "CDH3", "CENPF", "CEP55", "CXXC5", "EGFR", "ERBB2",
+    "CDC20", "CDC6", "CDH3", "CENPF", "CEP55", "CXXC5", "EGFR", "ERBB2",
     "ESR1", "EXO1", "FGFR4", "FOXA1", "FOXC1", "GPR160", "GRB7", "KIF2C",
-    "KNTC2", "KRT14", "KRT17", "KRT5", "MAPT", "MDM2", "MELK", "MIA",
-    "MKI67", "MLPH", "MMP11", "MYBL2", "MYC", "NAT1", "ORC6L", "PGR",
+    "KRT14", "KRT17", "KRT5", "MAPT", "MDM2", "MELK", "MIA",
+    "MKI67", "MLPH", "MMP11", "MYBL2", "MYC", "NAT1", "NDC80",  # published symbol: KNTC2
+    "NUF2",  # published symbol: CDCA1
+    "ORC6L", "PGR",
     "PHGDH", "PTTG1", "RRM2", "SFRP1", "SLC39A6", "TMEM45B", "TYMS",
     "UBE2C", "UBE2T",
 ]
+
+# genefu's Parker 2009 centroid matrix ships with these older gene symbols; map centroid
+# row names to the RNA-seq column names before matching against the data.
+PAM50_ALIASES = {"CDCA1": "NUF2", "KNTC2": "NDC80"}
 
 # Breast Cancer Index proxy: HOXB13 - IL17RB (log-scale ratio) + mean of the molecular grade genes
 BCI_HI_GENES = ["HOXB13", "IL17RB"]
@@ -34,13 +46,6 @@ MAMMOSTRAT_GENES = ["TP53", "CEACAM5", "NDRG1", "SLC7A5", "TRMT10C"]
 MAMMOSTRAT_ALIASES = ["HTF9C", "RG9MTD1"]  # alternate symbols for TRMT10C in some annotation builds
 
 IHC4_WEIGHTS = {"ESR1": -0.100, "PGR": -0.079, "ERBB2": 0.586, "MKI67": 0.240}
-
-KIM10_WEIGHTS = {
-    "DGKH": 0.818636, "GADD45B": 0.018069, "KLF7": 0.605352,
-    "LYST": 0.231666, "NR6A1": 1.305352, "PYCARD": -0.052086,
-    "ROBO1": -0.196973, "SLC22A20P": 0.968759,
-    "SLC24A3": 0.098331, "SLC45A4": 0.311646,
-}
 
 IRRS7_WEIGHTS = {
     "EZR": 0.040, "LIFR": -0.046, "TBC1D4": -0.138, "SAA1": -0.0105,
@@ -60,7 +65,6 @@ SIGNATURES = [
     ("BCI", "Breast Cancer Index"),
     ("Mammostrat", "Mammostrat"),
     ("IHC4", "IHC4"),
-    ("Kim10", "Kim-10"),
     ("IRRS7", "IRRS-7"),
     ("Hu11", "Hu-11"),
 ]
@@ -77,7 +81,6 @@ def get_all_signature_genes():
     genes.update(MAMMOSTRAT_GENES)
     genes.update(MAMMOSTRAT_ALIASES)
     genes.update(IHC4_WEIGHTS)
-    genes.update(KIM10_WEIGHTS)
     genes.update(IRRS7_WEIGHTS)
     genes.update(HU11_WEIGHTS)
     return sorted(genes)
@@ -94,13 +97,14 @@ def get_signature_reference_text():
         "Every signature produces a continuous score from log2 RNA-seq expression. In this study 'High Risk' means the "
         "score is above the cohort median for that signature (1), otherwise 'Low Risk' (0). These are research "
         "re-implementations, not the proprietary commercial assays.",
-        f"- Oncotype DX: weighted sum. {oncotype_groups}; single genes {_format_weights(ONCOTYPE_SINGLE_GENES)}.",
+        f"- Oncotype DX: every gene is first normalised by subtracting the patient's mean expression of five reference "
+        f"genes ({', '.join(ONCOTYPE_REFERENCE_GENES)}), per Paik et al. (2004), then scored as a weighted sum. "
+        f"{oncotype_groups}; single genes {_format_weights(ONCOTYPE_SINGLE_GENES)}.",
         f"- PAM50: correlates the patient's median-centred expression of 50 genes ({', '.join(PAM50_GENES)}) with the five "
         "Parker centroids (Basal, HER2, LumA, LumB, Normal) and combines the correlations into a risk-of-recurrence score.",
         f"- Breast Cancer Index: ({BCI_HI_GENES[0]} - {BCI_HI_GENES[1]}) + mean({', '.join(BCI_MGI_GENES)}), equal weights.",
         f"- Mammostrat: unweighted mean of {', '.join(MAMMOSTRAT_GENES)}.",
         f"- IHC4: weighted sum of {_format_weights(IHC4_WEIGHTS)}.",
-        f"- Kim-10: weighted sum of {_format_weights(KIM10_WEIGHTS)}.",
         f"- IRRS-7: weighted sum of {_format_weights(IRRS7_WEIGHTS)}.",
         f"- Hu-11: weighted sum of {_format_weights(HU11_WEIGHTS)}.",
     ])

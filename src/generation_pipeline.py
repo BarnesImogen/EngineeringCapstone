@@ -167,7 +167,18 @@ def process_cohort(input_filename, output_filename, ablation="full", limit=DEFAU
     # Every gene symbol used by any signature (single source of truth: signature_definitions.py)
     transcriptomic_columns = get_all_signature_genes()
 
-    clinical_fields = [("years_to_birth", "Age at diagnosis"), ("ER.Status", "ER status"), ("pathologic_stage", "Pathologic stage")]
+    clinical_fields = [
+        ("years_to_birth", "Age at diagnosis"),
+        ("ER.Status", "ER status"),
+        ("pathologic_stage", "Pathologic stage"),
+        ("pathology_T_stage", "T stage"),
+        ("pathology_N_stage", "N stage (nodal status)"),
+        ("pathology_M_stage", "M stage"),
+        ("histological_type", "Histological type"),
+        ("number_of_lymph_nodes", "Positive lymph nodes"),
+        ("PR.Status", "PR status"),
+        ("HER2.Status", "HER2 status"),
+    ]
 
     available_tx_cols = [g for g in transcriptomic_columns if g in df.columns]
 

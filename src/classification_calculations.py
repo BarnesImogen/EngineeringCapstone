@@ -5,8 +5,8 @@ from rpy2.robjects import pandas2ri
 from rpy2.robjects.conversion import localconverter
 from scipy.stats import spearmanr
 from signature_definitions import (
-    ONCOTYPE_GROUPS, ONCOTYPE_SINGLE_GENES, BCI_HI_GENES, BCI_MGI_GENES, MAMMOSTRAT_GENES,
-    IHC4_WEIGHTS, KIM10_WEIGHTS, IRRS7_WEIGHTS, HU11_WEIGHTS,
+    ONCOTYPE_GROUPS, ONCOTYPE_SINGLE_GENES, ONCOTYPE_REFERENCE_GENES, BCI_HI_GENES, BCI_MGI_GENES,
+    MAMMOSTRAT_GENES, IHC4_WEIGHTS, IRRS7_WEIGHTS, HU11_WEIGHTS, PAM50_ALIASES,
 )
 
 
@@ -15,18 +15,17 @@ from signature_definitions import (
 # Breast Cancer Index (BCI), ✅
 # Mammostrat ✅
 # IHC4 ✅
-# Kim10 ✅
 # IRRS7 ✅
 # Hu11 ✅
 
 def calculate_oncotype_dx_score(df):
     """
     Oncotype DX 21-gene Recurrence Score (Paik et al., 2004)
-    
+
     NOTE: Exact proprietary weights are not publicly available.
-    This implementation uses the published formula structure from 
+    This implementation uses the published formula structure from
     Paik et al. (2004) with approximated group score weights.
-    
+
     Formula structure:
     RS = +0.47 * GRB7_group
         - 0.34 * ER_group
@@ -35,11 +34,15 @@ def calculate_oncotype_dx_score(df):
         + 0.05 * CD68
         - 0.08 * GSTM1
         - 0.07 * BAG1
-    
+
     Risk categories:
     Low:          RS < 18
     Intermediate: 18 <= RS < 31
     High:         RS >= 31
+
+    Before scoring, every gene is normalised against the mean of five reference genes
+    (ACTB, GAPDH, GUSB, RPLP0, TFRC), per the published assay (Paik et al., 2004). The
+    data is already log2-scaled, so normalisation is a per-patient subtraction.
     """
 
     def group_score(row, genes):
@@ -47,6 +50,11 @@ def calculate_oncotype_dx_score(df):
         if not available:
             return 0
         return row[available].mean()
+
+    def calculate_rs(row):
+        rs = sum(weight * group_score(row, genes) for genes, weight in ONCOTYPE_GROUPS.values())
+        rs += sum(weight * row.get(gene, 0) for gene, weight in ONCOTYPE_SINGLE_GENES.items())
+        return rs
 
     all_genes = [g for genes, _ in ONCOTYPE_GROUPS.values() for g in genes] + list(ONCOTYPE_SINGLE_GENES)
     available = [g for g in all_genes if g in df.columns]
@@ -56,13 +64,20 @@ def calculate_oncotype_dx_score(df):
     if missing:
         print(f"Missing: {missing}")
 
-    def calculate_rs(row):
-        rs = sum(weight * group_score(row, genes) for genes, weight in ONCOTYPE_GROUPS.values())
-        rs += sum(weight * row.get(gene, 0) for gene, weight in ONCOTYPE_SINGLE_GENES.items())
-        return rs
+    ref_available = [g for g in ONCOTYPE_REFERENCE_GENES if g in df.columns]
+    ref_missing = [g for g in ONCOTYPE_REFERENCE_GENES if g not in df.columns]
+    print(f"Oncotype DX: Found {len(ref_available)}/{len(ONCOTYPE_REFERENCE_GENES)} reference genes")
+    if ref_missing:
+        print(f"Missing reference genes: {ref_missing}")
+    reference_mean = df[ref_available].mean(axis=1)
 
-    score = df[available].apply(calculate_rs, axis=1)
-    return score
+    unnormalized_score = df[available].apply(calculate_rs, axis=1)
+    normalized_score = df[available].sub(reference_mean, axis=0).apply(calculate_rs, axis=1)
+
+    corr, _ = spearmanr(unnormalized_score, normalized_score)
+    print(f"Oncotype DX: Spearman correlation between un-normalised and reference-normalised scores: {corr:.4f}")
+
+    return normalized_score
 
 def fetch_pam50_centroids():
     """
@@ -98,10 +113,16 @@ def calculate_pam50_score(df, centroid_df):
     df: Patient data (rows=patients, cols=genes)
     centroid_df: Parker 2009 centroids (rows=50 genes, cols=5 subtypes)
     """
-    # 1. Ensure we only have the 50 PAM50 genes
+    # 1. Ensure we only have the 50 PAM50 genes. The genefu centroid matrix uses older gene
+    # symbols (CDCA1, KNTC2); map them to the RNA-seq column names before matching.
+    centroid_df = centroid_df.rename(index=PAM50_ALIASES)
     genes = centroid_df.index.tolist()
     available_genes = [g for g in genes if g in df.columns]
-    
+
+    print(f"PAM50: Found {len(available_genes)}/{len(genes)} genes")
+    if len(available_genes) < len(genes):
+        print(f"Missing: {sorted(set(genes) - set(available_genes))}")
+
     # 2. Median-Centre the data (CRITICAL step for PAM50)
     # We must centre the data against the entire cohort's median
     centered_df = df[available_genes] - df[available_genes].median(axis=0)
@@ -204,27 +225,6 @@ def calculate_ihc4_score(df):
     score = df[available_genes].apply(
         lambda row: sum(row[g] * weights[g] for g in available_genes), axis=1
     )
-    return score
-
-def calculate_kim10_tnbc_score(df):
-    """
-    Kim-10 TNBC Signature (Kim et al., 2024)
-    Focus: Early-stage Triple-Negative Breast Cancer recurrence risk.
-    
-    Risk score formula:
-    (0.818636 x DGKH) + (0.018069 x GADD45B) + (0.605352 x KLF7) + 
-    (0.231666 x LYST) + (1.305352 x NR6A1) + (-0.052086 x PYCARD) + 
-    (-0.196973 x ROBO1) + (0.968759 x SLC22A20P) + (0.098331 x SLC24A3) + 
-    (0.311646 x SLC45A4)
-    """
-    weights = KIM10_WEIGHTS
-
-    available_genes = [g for g in weights.keys() if g in df.columns]
-
-    score = df[available_genes].apply(
-        lambda row: sum(row[g] * weights[g] for g in available_genes), axis=1
-    )
-
     return score
 
 def calculate_irrs7_score(df):
