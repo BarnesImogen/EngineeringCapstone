@@ -5,7 +5,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 import argparse
 from run_paths import generation_path, load_config
-from signature_definitions import get_all_signature_genes, SIGNATURES
+from signature_definitions import get_all_signature_genes, get_class_cutoffs, format_signature_class, SIGNATURES
 from arbitration import SYSTEM_INSTRUCTION, ABLATIONS, build_prompt, parse_final_resolution, majority_vote
 
 load_dotenv()
@@ -17,6 +17,7 @@ CONFIG_PATH = "config.yml"
 OUTPUT_DIR = "data/generation_outputs"
 MASTER_FILE = "data/processed/tcga_master_results.csv"
 DEFAULT_LIMIT = 6  # quick-test size; pass --limit 0 for the final full run
+PILOT_SEED = 42  # fixed so a stratified pilot draws the same patients again (and --resume works)
 
 config = load_config(CONFIG_PATH)
 
@@ -95,7 +96,7 @@ def get_reactome_active_pathways(upregulated_genes, reactome_index):
 # config/client/Reactome setup.
 class ArbitrationResult(BaseModel):
     final_risk_class: str = Field(description="Must strictly be either 'High Risk' or 'Low Risk'.")
-    arbitration_summary: str = Field(description="The structured markdown summary executing the 3 required arbitration steps: Conflict Diagnosis, Mechanistic Root Cause, and Prognostic Resolution.")
+    arbitration_summary: str = Field(description="The structured markdown summary executing the 3 required arbitration steps: Classification Assessment, Mechanistic Explanation, and Prognostic Resolution.")
 
 arbitration_schema = {
     "name": "arbitration_result",
@@ -181,10 +182,20 @@ def load_gene_medians(df, available_tx_cols, input_filename):
     print(f"[WARNING] {MASTER_FILE} not found; falling back to medians from {input_filename} only.")
     return df[available_tx_cols].median()
 
-def build_case_context(row, available_tx_cols, gene_medians):
+def load_class_cutoffs():
+    """Cutoffs behind each signature's class. Tertile cut points must come from the whole cohort
+    (the master file), not from the concordant/discordant subset being processed."""
+    if not os.path.exists(MASTER_FILE):
+        raise FileNotFoundError(f"{MASTER_FILE} not found; run bioinformatics_pipeline.py first.")
+    return get_class_cutoffs(pd.read_csv(MASTER_FILE, usecols=[f"{key}_Score" for key, _ in SIGNATURES]))
+
+def build_case_context(row, available_tx_cols, gene_medians, class_cutoffs):
     """The evidence blocks for one patient: (clinical, signature classes, transcriptomics, Reactome pathways)."""
     clinical_meta = "\n".join(f"{label}: {row[col]}" for col, label in CLINICAL_FIELDS if col in row and pd.notna(row[col]))
-    sig_classifications = "\n".join(f"{label}: {row[col]}" for _, label, col in SIG_COLUMNS if col in row and pd.notna(row[col]))
+    sig_classifications = "\n".join(
+        format_signature_class(key, label, row[col], row[f"{key}_Score"], class_cutoffs[key])
+        for key, label, col in SIG_COLUMNS if col in row and pd.notna(row[col])
+    )
     transcriptomics = "\n".join(f"{gene}: {row[gene]:.4f}" if isinstance(row[gene], (float, int)) else f"{gene}: {row[gene]}" for gene in available_tx_cols if pd.notna(row[gene]))
 
     # Identify upregulated genes
@@ -194,7 +205,40 @@ def build_case_context(row, available_tx_cols, gene_medians):
     extracted_pathways_str = get_reactome_active_pathways(upregulated_genes, REACTOME_INDEX)
     return clinical_meta, sig_classifications, transcriptomics, extracted_pathways_str
 
-def process_cohort(input_filename, output_filename, ablation="full", limit=DEFAULT_LIMIT, resume=False):
+# Pilot strata for the discordant cohort, from Lone_Dissenter: Hu-11, IRRS-7, any other signature, none
+LONE_DISSENTER_STRATA = {"Hu11": "Hu-11", "IRRS7": "IRRS-7"}
+PILOT_STRATA = ["Hu-11", "IRRS-7", "other", "none"]
+
+def lone_dissenter_stratum(value):
+    if pd.isna(value) or value == "":
+        return "none"
+    return LONE_DISSENTER_STRATA.get(value, "other")
+
+def pilot_strata(df, cohort):
+    """Stratum per patient for a pilot draw: the lone dissenting signature for discordant cases,
+    the consensus class for concordant cases."""
+    if cohort == "discordant":
+        return df["Lone_Dissenter"].map(lone_dissenter_stratum), PILOT_STRATA
+    return df["Consensus_Risk"], ["High Risk", "Low Risk"]
+
+def stratified_sample(df, n, cohort, seed=PILOT_SEED):
+    """Up to n patients spread as evenly as possible across the cohort's pilot strata (a stratum
+    smaller than its share gives its remainder to the others), drawn at random within each
+    stratum with a fixed seed."""
+    strata, names = pilot_strata(df, cohort)
+    groups = {name: df[strata == name] for name in names}
+    quota = dict.fromkeys(groups, 0)
+    remaining = n
+    while remaining > 0 and any(quota[name] < len(group) for name, group in groups.items()):
+        for name, group in groups.items():
+            if remaining > 0 and quota[name] < len(group):
+                quota[name] += 1
+                remaining -= 1
+    print(f"Stratified pilot sample ({cohort}): "
+          + ", ".join(f"{name} {quota[name]}/{len(group)}" for name, group in groups.items()))
+    return pd.concat([group.sample(quota[name], random_state=seed) for name, group in groups.items()])
+
+def process_cohort(input_filename, output_filename, cohort, ablation="full", limit=DEFAULT_LIMIT, resume=False, sampler="first"):
     if not os.path.exists(input_filename):
         print(f"File not found: {input_filename}. Skipping cohort.")
         return
@@ -204,9 +248,15 @@ def process_cohort(input_filename, output_filename, ablation="full", limit=DEFAU
     # Every gene symbol used by any signature (single source of truth: signature_definitions.py)
     available_tx_cols = [g for g in get_all_signature_genes() if g in df.columns]
     gene_medians = load_gene_medians(df, available_tx_cols, input_filename)
+    class_cutoffs = load_class_cutoffs()
 
-    # limit=0 runs the entire cohort
-    sample_df = df if limit == 0 else df.head(limit)
+    # limit=0 runs the entire cohort; otherwise the first `limit` cases, or a stratified pilot draw
+    if limit == 0:
+        sample_df = df
+    elif sampler == "stratified":
+        sample_df = stratified_sample(df, limit, cohort)
+    else:
+        sample_df = df.head(limit)
     include = ABLATIONS[ablation]
 
     # Rows are appended to the output file as they finish, so a crash loses at most one case.
@@ -234,7 +284,7 @@ def process_cohort(input_filename, output_filename, ablation="full", limit=DEFAU
         print(f"[{position}/{n_total}] Processing Patient: {p_id}...")
 
         clinical_meta, sig_classifications, transcriptomics, extracted_pathways_str = build_case_context(
-            row, available_tx_cols, gene_medians)
+            row, available_tx_cols, gene_medians, class_cutoffs)
 
         final_risk, summary = generate_patient_summary(
             patient_id=p_id,
@@ -284,6 +334,10 @@ if __name__ == "__main__":
                         help="Which evidence the model sees (non-full runs are saved with a suffix).")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT,
                         help=f"Cases per cohort (default {DEFAULT_LIMIT} for quick tests; 0 = whole cohort).")
+    parser.add_argument("--sampler", choices=["first", "stratified"], default="first",
+                        help="How --limit picks cases. 'stratified' draws evenly, with a fixed seed, across the lone "
+                             "dissenting signature (Hu-11, IRRS-7, other, none) for discordant cases and across "
+                             "Consensus High / Low for concordant cases.")
     parser.add_argument("--resume", action="store_true",
                         help="Continue an interrupted run: keep finished cases, retry failed or missing ones.")
     parser.add_argument("--cohorts", nargs="+", choices=["concordant", "discordant"], default=["concordant", "discordant"])
@@ -294,4 +348,4 @@ if __name__ == "__main__":
 
     for cohort in args.cohorts:
         process_cohort(f"data/processed/tcga_{cohort}_cases.csv", generation_path(cohort, model_to_use, args.ablation),
-                       ablation=args.ablation, limit=args.limit, resume=args.resume)
+                       cohort, ablation=args.ablation, limit=args.limit, resume=args.resume, sampler=args.sampler)

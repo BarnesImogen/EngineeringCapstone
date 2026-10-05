@@ -69,10 +69,15 @@ IRRS7_WEIGHTS = {
     "NSF": 0.0218, "RPL5": -0.0566, "PGK1": 0.464,
 }
 
+# Hu et al. (2024), Translational Cancer Research 13(7), Figure 3C. Read from the bar labels,
+# which are rounded to two decimals; the paper gives no table of exact coefficients. The paper
+# applies them to log2(DESeq2-normalised counts + 1) with no z-scoring, so they are applied to
+# log2 RNA-seq values here as well. The coefficients sum to 0, so a per-sample shift in log2
+# expression (library-size normalisation, RSEM vs DESeq2) does not change the score.
 HU11_WEIGHTS = {
-    "IL18": 0.115, "IL12B": 0.203, "RASGRP1": -0.142, "HPN": 0.089,
-    "CLEC5A": 0.176, "SCARF1": 0.134, "TACR3": 0.212, "VIP": -0.108,
-    "CCL2": 0.095, "CALCRL": 0.122, "ABCA1": -0.076,
+    "IL18": -0.18, "IL12B": -0.12, "RASGRP1": -0.09, "HPN": -0.07,
+    "CLEC5A": -0.01, "SCARF1": 0.03, "TACR3": 0.04, "VIP": 0.05,
+    "CCL2": 0.07, "CALCRL": 0.13, "ABCA1": 0.15,
 }
 
 # Canonical (score/class column key, display label) pair for each signature, in cohort/prompt order.
@@ -87,6 +92,53 @@ SIGNATURES = [
 # Published cutoffs per signature; signatures not listed here (Oncotype DX, IRRS-7, Hu-11) are split
 # at cohort tertiles.
 PUBLISHED_CUTOFFS = {"Pam50": PAM50_CUTOFFS, "BCI": BCI_CUTOFFS}
+
+# How each signature's score is named and rounded when shown to the LLM and the judge
+SCORE_DISPLAY = {
+    "OncotypeDX": ("RSU", 3),
+    "Pam50": ("ROR-S", 1),
+    "BCI": ("BCI", 3),
+    "IRRS7": ("IRRS-7 score", 4),
+    "Hu11": ("Hu-11 score", 4),
+}
+
+def tertile_cutoffs(score):
+    """Cohort tertile cut points (lower, upper) of a score: Low <= lower < Intermediate <= upper < High.
+
+    When a cut point lands on a patient's score (n - 1 divisible by 3), interpolation can leave it a
+    rounding error away from that score; it is snapped to the score so the patient is classed
+    consistently, whether the scores come from memory or from a CSV round trip."""
+    cuts = []
+    for cut in score.quantile([1 / 3, 2 / 3]):
+        nearest = score.iloc[(score - cut).abs().argmin()]
+        cuts.append(nearest if abs(nearest - cut) < 1e-9 else cut)
+    return tuple(cuts)
+
+def get_class_cutoffs(cohort_scores):
+    """{signature key: ((lower, upper), is_tertile)} for every signature. Published cutoffs where
+    they are used; otherwise the cohort tertile cut points of {key}_Score in cohort_scores (the
+    whole cohort, so they match the classes assigned by bioinformatics_pipeline.py)."""
+    cutoffs = {}
+    for key, _ in SIGNATURES:
+        if key in PUBLISHED_CUTOFFS:
+            cutoffs[key] = (PUBLISHED_CUTOFFS[key], False)
+        else:
+            cutoffs[key] = (tertile_cutoffs(cohort_scores[f"{key}_Score"]), True)
+    return cutoffs
+
+def format_signature_class(key, label, risk_class, score, cutoffs):
+    """e.g. 'PAM50: High (ROR-S 71.2; Intermediate 29 to < 53, High >= 53)'"""
+    score_name, decimals = SCORE_DISPLAY[key]
+    (lower, upper), is_tertile = cutoffs
+    # A score just either side of a cutoff must not round onto it, or the class would look wrong
+    while decimals < 8 and any(score != c and round(score, decimals) == round(c, decimals) for c in (lower, upper)):
+        decimals += 1
+    if is_tertile:
+        rule = (f"cohort tertiles: Intermediate > {lower:.{decimals}f} to <= {upper:.{decimals}f}, "
+                f"High > {upper:.{decimals}f}")
+    else:
+        rule = f"Intermediate {lower:g} to < {upper:g}, High >= {upper:g}"
+    return f"{label}: {risk_class} ({score_name} {score:.{decimals}f}; {rule})"
 
 def get_all_signature_genes():
     """Every gene symbol used by any signature: the full transcriptomic panel shown to the model."""

@@ -6,7 +6,7 @@ from rpy2.robjects.conversion import localconverter
 from scipy.stats import gaussian_kde
 from sklearn.mixture import GaussianMixture
 from signature_definitions import (
-    RISK_CLASSES,
+    RISK_CLASSES, tertile_cutoffs,
     ONCOTYPE_GROUPS, ONCOTYPE_SINGLE_GENES, ONCOTYPE_REFERENCE_GENES, ONCOTYPE_GENE_SCALE, ONCOTYPE_REFERENCE_OFFSET,
     ONCOTYPE_RSU_OFFSET, ONCOTYPE_RSU_MULTIPLIER,
     PAM50_ALIASES, ROR_S_COEFFICIENTS,
@@ -35,8 +35,10 @@ def classify_by_cutoffs(score, cutoffs):
     return pd.Series(np.select([score < low, score < high], RISK_CLASSES[:2], RISK_CLASSES[2]), index=score.index)
 
 def classify_by_tertiles(score):
-    """Low / Intermediate / High by cohort tertiles of the score."""
-    return pd.qcut(score, 3, labels=RISK_CLASSES).astype(str)
+    """Low / Intermediate / High by cohort tertiles of the score. Uses the same cut points the
+    prompts show (tertile_cutoffs), so a displayed score and cutoff always imply the class."""
+    lower, upper = tertile_cutoffs(score)
+    return pd.Series(np.select([score <= lower, score <= upper], RISK_CLASSES[:2], RISK_CLASSES[2]), index=score.index)
 
 def infer_er_status(esr1):
     """
@@ -265,11 +267,18 @@ def calculate_bci_score(df, er_status, mgi_scaling="pc"):
 
 def calculate_irrs7_score(df):
     """
-    IRRS-7 Signature (MDPI/Frontiers, 2025)
-    Focus: Insulin Resistance-Related Prognostic Score.
+    IRRS-7 Signature (Wei et al., 2025, Biology 14(5):539)
+    Focus: Insulin Resistance-Related Prognostic Score. Higher score = worse overall survival.
+
+    Coefficients and signs match the paper. The paper z-scored log2 TPM per gene before applying
+    them; this applies them to log2 RSEM without z-scoring (Spearman 0.991 between the two on
+    this cohort, with the same survival association).
 
     Classes come from cohort tertiles. The original paper used a median split; tertiles are a
     deliberate deviation so every signature in the panel has Low / Intermediate / High classes.
+
+    The signature was developed on TCGA-BRCA (the training cohort), so its survival association
+    in this cohort is in-sample and optimistic.
     """
     weights = IRRS7_WEIGHTS
 
@@ -282,11 +291,18 @@ def calculate_irrs7_score(df):
 
 def calculate_hu11_irg_score(df):
     """
-    Hu-11 IRG Signature (Hu et al., 2024)
-    Focus: Inflammation-Related Genes and immune microenvironment.
+    Hu-11 IRG Signature (Hu et al., 2024, Translational Cancer Research 13(7):3652-3667)
+    Focus: Inflammation-Related Genes and immune microenvironment. Higher score = worse overall
+    survival.
+
+    Coefficients are read from the paper's Figure 3C (see HU11_WEIGHTS) and applied, as in the
+    paper, to log2 expression with no z-scoring.
 
     Classes come from cohort tertiles. The original paper used a median split; tertiles are a
     deliberate deviation so every signature in the panel has Low / Intermediate / High classes.
+
+    The signature was developed on TCGA-BRCA (the LASSO training cohort), so its survival
+    association in this cohort is in-sample and optimistic.
     """
     weights = HU11_WEIGHTS
 

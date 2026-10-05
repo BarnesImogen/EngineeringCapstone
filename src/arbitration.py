@@ -10,7 +10,8 @@ from signature_definitions import get_signature_reference_text
 
 SYSTEM_INSTRUCTION = inspect.cleandoc("""
     You are an advanced bioinformatics AI specialising in genomic oncology.
-    Your task is to analyse transcriptomic profiles and resolve discordant prognostic risk classifications across multi-gene signatures.
+    Your task is to analyse transcriptomic profiles, assess the prognostic risk classifications of several multi-gene
+    signatures, explain any conflicts between them, and give a final risk classification.
 
     CRITICAL ANTI-HALLUCINATION CONSTRAINT:
     Base your biological synthesis EXCLUSIVELY on data explicitly provided in this prompt: the "Signature Definitions",
@@ -34,8 +35,9 @@ ABLATIONS = {
 
 # Shown with the signature classes in every prompt (and so in the semantic-entropy evidence too)
 CLASS_LEGEND = (
-    "Each signature places the patient in Low, Intermediate or High risk. Intermediate means that signature "
-    "does not take a side; it supports neither High nor Low risk."
+    "Each signature places the patient in Low, Intermediate or High risk. Each line gives the class, the "
+    "patient's score and the cutoffs that produced the class. Intermediate means that signature does not take "
+    "a side; it supports neither High nor Low risk."
 )
 
 FINAL_RESOLUTION_PATTERN = re.compile(r"FINAL RESOLUTION:\s*\**\s*(High|Low)\s+Risk", re.IGNORECASE)
@@ -59,7 +61,7 @@ def majority_vote(classes):
 def build_prompt(patient_id, clinical_data, signature_classifications, transcriptomic_data, active_pathways, ablation="full"):
     include = ABLATIONS[ablation]
     sections = [
-        "Please act as a Bioinformatics Arbitrator to resolve the prognostic discordance for this patient.",
+        "Please act as a Bioinformatics Arbitrator and assess the prognostic risk classifications for this patient.",
         f"Patient ID: {patient_id}",
     ]
     if include["clinical"]:
@@ -78,10 +80,12 @@ def build_prompt(patient_id, clinical_data, signature_classifications, transcrip
     evidence = "the Signature Definitions and the provided pathways" if include["pathways"] else "the Signature Definitions and the provided evidence"
     sections.append(
         "REQUIRED ARBITRATION STEPS:\n"
-        "1. Conflict Diagnosis: Explicitly state WHICH algorithms are conflicting (the High against the Low "
-        "classifications; Intermediate signatures do not take a side).\n"
-        f"2. Mechanistic Root Cause: Using {evidence}, explain EXACTLY why the algorithms disagreed based on how they mathematically weight different biomarkers.\n"
-        "3. Prognostic Resolution: Deliver a final, tie-breaking risk classification based on the biological evidence provided."
+        "1. Classification Assessment: Review each algorithm's classification and state whether any conflict: a "
+        "conflict is at least one High against at least one Low (Intermediate signatures do not take a side). "
+        "If there is no conflict, say so.\n"
+        f"2. Mechanistic Explanation: Using {evidence}, explain why the algorithms agree or disagree, based on how "
+        "they mathematically weight different biomarkers and on this patient's values.\n"
+        "3. Prognostic Resolution: Give a final risk classification based on the biological evidence provided."
     )
     sections.append(
         "IMPORTANT: Your final classification must be binary even if some signatures are Intermediate. "

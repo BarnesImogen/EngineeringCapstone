@@ -96,7 +96,7 @@ Needs R + Bioconductor `genefu` via `rpy2`. Scores the five signatures and write
 ```bash
 python src/generation_pipeline.py --model NAME --limit 6
 ```
-Quick test with 6 cases; use `--limit 0` for the full cohort, `--resume` to continue an interrupted run. `--ablation no_pathways|clinical_only|classes_only` exists but per [TODO.md](TODO.md) is being left out of the main flow for now. Outputs are written to `data/generation_outputs/` as `{cohort}_results__{model}__{ablation}.csv`.
+Quick test with 6 cases; use `--limit 0` for the full cohort, `--resume` to continue an interrupted run. `--sampler stratified` makes a pilot draw with a fixed seed instead of taking the first N: discordant cases spread evenly across the lone dissenting signature (Hu-11, IRRS-7, other, none), concordant cases evenly across Consensus High and Low. `--ablation no_pathways|clinical_only|classes_only` exists but per [TODO.md](TODO.md) is being left out of the main flow for now. Outputs are written to `data/generation_outputs/` as `{cohort}_results__{model}__{ablation}.csv`.
 
 **3. Sanity check on concordant cases**
 ```bash
@@ -131,7 +131,7 @@ to test whether entropy predicts wrong risk classes (concordant cohort) and poor
   - **Oncotype DX** (Paik et al., 2004; genefu `oncotypedx`): genes are normalised against the mean of five reference genes (ACTB, GAPDH, GUSB, RPLP0, TFRC), rescaled to 0-15 across the cohort, combined into the published group scores (with floors) and the unscaled score RSU. RSU is the continuous score and is classified by cohort tertiles. The published RS cutoffs (18 / 31) put 45-67% of ER+ patients in High on RNA-seq, against ~15-27% in published cohorts, so they are not used. RS (bounded 0-100) is kept as `OncotypeDX_RS` for reference.
   - **PAM50** (Parker et al., 2009; genefu `rorS`): Parker centroids from the R `genefu` package, ER-balanced median centring (fixed seed), Spearman correlation to each centroid, ROR-S = 0.05·Basal + 0.12·HER2 − 0.34·LumA + 0.23·LumB, rescaled to 0-100 on the cohort's 2.5th-97.5th percentiles. Published cutoffs: Low < 29, Intermediate < 53, High ≥ 53. Two PAM50 genes (CDCA1, KNTC2) are listed under symbols the RNA-seq file doesn't use, so `signature_definitions.py` aliases them to NUF2 and NDC80.
   - **Breast Cancer Index** (Ma et al., 2008; Habel et al., 2013): MGI is the first principal component of five standardised proliferation genes; H/I = HOXB13 − IL17RB, standardised. Standardisation and the PCA are fitted on ER+ patients (the one deviation from the published assay, which used a reference set that isn't available). BCI = 0.4431·MGI + 0.4972·H/I − 0.09·H/I³, rescaled to 0-10. Published cutoffs: Low < 5, Intermediate < 6.4, High ≥ 6.4.
-  - **IRRS-7** and **Hu-11**: weighted sums as published, classified by cohort tertiles (their papers used a median split; tertiles keep the panel consistent).
+  - **IRRS-7** (Wei et al., 2025) and **Hu-11** (Hu et al., 2024): weighted sums of log2 expression with the published coefficients (Hu-11's read from the paper's Figure 3C, two decimals), classified by cohort tertiles (their papers used a median split; tertiles keep the panel consistent). Both were developed on TCGA-BRCA, so their survival association in this cohort is in-sample.
   - Oncotype DX and BCI are research re-implementations, not the proprietary assays. Each signature also keeps the old 0/1 median split as `{sig}_Class_Median` for sensitivity analysis.
 - `bioinformatics_pipeline.py` defines the cohorts from the five classes:
   - **Discordant:** at least one signature High and at least one Low. `Lone_Dissenter` names the signature that alone takes the opposite side, if there is one.
@@ -140,7 +140,7 @@ to test whether entropy predicts wrong risk classes (concordant cohort) and poor
   - `Discordance_Group` is the five-signature definition used by generation and evaluation; `Discordance_Group_No_Hu11` repeats it without Hu-11 as a sensitivity analysis.
 
 ### Resolving and interpreting: the LLM arbitrator
-`generation_pipeline.py` builds one prompt per patient from the clinical metadata, the signature definitions, the five conflicting classes, the expression values and Reactome pathways matched to the patient's upregulated genes. The model works through three steps: Conflict Diagnosis, Mechanistic Root Cause (interpret) and Prognostic Resolution (resolve). The prompt explains that an Intermediate signature does not take a side, and the model must still finish with a binary `FINAL RESOLUTION: High Risk` or `Low Risk`. A system prompt restricts it to the supplied evidence. The output is extracted into a validated JSON schema. Each output row also records `majority_vote` and `majority_vote_without_hu11` (High against Low calls, Intermediate ignored, `Tie` when equal) to compare the model's call against.
+`generation_pipeline.py` builds one prompt per patient from the clinical metadata, the signature definitions, the five conflicting classes, the expression values and Reactome pathways matched to the patient's upregulated genes. The same prompt is used for concordant and discordant patients. The model works through three steps: Classification Assessment (identify any High-against-Low conflict), Mechanistic Explanation (interpret) and Prognostic Resolution (resolve). Each signature line shows the class, the patient's score and the cutoffs that produced the class. The prompt explains that an Intermediate signature does not take a side, and the model must still finish with a binary `FINAL RESOLUTION: High Risk` or `Low Risk`. A system prompt restricts it to the supplied evidence. The output is extracted into a validated JSON schema. Each output row also records `majority_vote` and `majority_vote_without_hu11` (High against Low calls, Intermediate ignored, `Tie` when equal) to compare the model's call against.
 
 Ablations remove evidence blocks (`no_pathways`, `clinical_only`, `classes_only`) to test what the model needs to see in order to interpret conflicts well.
 
@@ -175,7 +175,8 @@ After running the full workflow, you should have:
 - Discordant cases have no ground truth. "Resolve" is evaluated through the concordant benchmark, the stability of the call across samples and the judge's rating.
 - The judge is an LLM. Its scores are also the validation target for semantic entropy on discordant cases.
 - For Oncotype DX, IRRS-7 and Hu-11 the classes are cohort tertiles, so they are relative to TCGA-BRCA, not absolute risk. PAM50's 0-100 scale is also rescaled on this cohort.
-- Hu-11 is the lone dissenter in most discordant cases and is not prognostic for overall survival in this cohort; `Discordance_Group_No_Hu11` and `majority_vote_without_hu11` exist to test its influence.
+- Hu-11 is nearly uncorrelated with the other four signatures and is the lone dissenter in most discordant cases; `Discordance_Group_No_Hu11` and `majority_vote_without_hu11` exist to test its influence.
+- IRRS-7 and Hu-11 were trained on TCGA-BRCA, so their survival associations here are in-sample.
 - Oncotype DX and BCI are approximations of the proprietary assays.
 
 ## Notes

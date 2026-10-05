@@ -54,7 +54,8 @@ evaluator_instruction = inspect.cleandoc("""
     You will be provided with:
     1. The FULL CONTEXT given to the AI during generation: Signature Definitions (gene sets, formulas, weights and
        class cutoffs for each algorithm), Clinical Metadata, Algorithmic Risk Classifications (Low / Intermediate /
-       High), Transcriptomic Profile, and Verified Active Pathways. This is everything the AI actually saw.
+       High, each with the patient's score and the cutoffs that produced it), Transcriptomic Profile, and Verified
+       Active Pathways. This is everything the AI actually saw.
     2. The AI'S GENERATED OUTPUT.
 
     Some context sections may be marked "Not provided to the AI in this run". That is intentional. Missing evidence is
@@ -66,7 +67,7 @@ evaluator_instruction = inspect.cleandoc("""
     grounded even if it triggered no pathway entry. Signature weighting claims are grounded only if they match the
     Signature Definitions. Claims that are simply wrong (wrong value, wrong direction, wrong weight) are ungrounded.
     In particular, each of these is UNGROUNDED: a misquoted formula, coefficient or cutoff (e.g. a wrong class
-    threshold, or claiming a tertile signature uses a fixed published cutoff); a signature's class stated wrongly
+    threshold, or claiming a tertile signature uses a fixed published cutoff); a signature's score or class stated wrongly
     (e.g. calling a signature High when the classifications list it as Intermediate).
 
     INTERMEDIATE CLASSES: a signature classified Intermediate does not take a side; it supports neither High nor
@@ -168,7 +169,7 @@ def run_evaluation(generated_by, ablation):
             {signature_reference}
             Clinical Metadata:
             {clinical_data}
-            Algorithmic Risk Classifications (Low / Intermediate / High; Intermediate means the signature does not take a side):
+            Algorithmic Risk Classifications (Low / Intermediate / High, each with the patient's score and the cutoffs that produced the class; Intermediate means the signature does not take a side):
             {signature_classifications}
             Transcriptomic Profile (Key Biomarkers & Expression Levels):
             {transcriptomic_data}
