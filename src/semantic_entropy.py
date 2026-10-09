@@ -10,8 +10,11 @@ For each patient:
   1. Rebuild the exact evidence the generation model saw (same system prompt and
      evidence sections as generation_pipeline.py).
   2. Ask the same focused question M times at temperature 1.0 (paper: M = 10,
-     T = 1.0, nucleus sampling p = 0.9). Each answer is one brief sentence
-     (the paper's sentence-length template) plus a FINAL RESOLUTION line.
+     T = 1.0, nucleus sampling p = 0.9). Each answer is one sentence of at most
+     15 words naming only the single main biological mechanism or program (no
+     gene names, no hedging), plus a FINAL RESOLUTION line. This is tighter
+     than the paper's sentence-length template so the entailment judge can
+     match paraphrases.
   3. Cluster the sentences by bidirectional entailment, conditioned on the
      question, using the paper's entailment prompt (entailment / neutral /
      contradiction) and its default strict rule: both directions must be
@@ -42,6 +45,7 @@ import argparse
 import hashlib
 import json
 import os
+import traceback
 from collections import Counter
 
 import numpy as np
@@ -69,11 +73,14 @@ QUESTIONS = {
 
 
 def sampling_prompt(evidence_prompt, question):
-    # Paper's sentence-length template ("Answer the following question in a single
-    # brief but complete sentence."), plus the pipeline's FINAL RESOLUTION line.
+    # Tighter than the paper's sentence-length template: one sentence of at most 15
+    # words naming a single mechanism, so the entailment judge can match paraphrases.
+    # Plus the pipeline's FINAL RESOLUTION line.
     return (
         f"{evidence_prompt}\n\n"
-        "Answer the following question in a single brief but complete sentence.\n"
+        "Answer the following question in ONE sentence of at most 15 words that names only "
+        "the single main biological mechanism or program. Do not list gene names, do not "
+        "hedge, and do not mention more than one mechanism.\n"
         f"Question: {question}\n\n"
         "Reply in exactly this format:\n"
         "ANSWER: <one sentence>\n"
@@ -307,9 +314,13 @@ def run_cohort(cohort, args, gen_client, entailment):
             result = score_row(row, cohort, args, gen_client, entailment)
         except Exception as e:
             print(f"  [ERROR] {e}")
+            traceback.print_exc()
             continue
+        answers = json.loads(result["sampled_answers"])
+        result["mean_answer_words"] = round(float(np.mean([len(a.split()) for a in answers])), 1)
         print(f"  semantic entropy {result['semantic_entropy']:.3f} "
-              f"({result['n_semantic_clusters']} clusters), risk entropy {result['risk_entropy']:.3f}")
+              f"({result['n_semantic_clusters']} clusters), risk entropy {result['risk_entropy']:.3f}, "
+              f"mean answer length {result['mean_answer_words']} words")
         pd.DataFrame([result]).to_csv(out, mode="a", header=not os.path.exists(out), index=False)
         entailment.save_cache()
     print(f"Saved to {out}")
