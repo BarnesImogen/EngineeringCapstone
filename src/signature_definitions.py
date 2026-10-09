@@ -27,9 +27,13 @@ ONCOTYPE_GENE_SCALE = 15
 ONCOTYPE_REFERENCE_OFFSET = 10
 # RS = 20 * (RSU - 6.7), bounded to [0, 100]
 ONCOTYPE_RSU_OFFSET, ONCOTYPE_RSU_MULTIPLIER = 6.7, 20
-# Published RS cutoffs (Low < 18 <= Intermediate < 31 <= High). Not used for classification: on
-# RNA-seq they put ~45-67% of ER+ patients in High (published cohorts: ~15-27%), so Oncotype DX
-# is classified by cohort tertiles of the unbounded RSU instead. Kept for reference.
+# Published RS cutoffs (Low < 18 <= Intermediate < 31 <= High). Not used for classification:
+# they need gene-wise calibration against commercial Recurrence Scores from the same tumours
+# (Buus et al. 2021, npj Breast Cancer 7:15), and TCGA has no commercial scores. Uncalibrated,
+# the algorithm overestimates RS about twofold and places most patients in a higher risk group
+# (Bartlett et al. 2020, PLoS ONE 15:e0238593). On this data the cutoffs put 45-67% of ER+
+# patients in High across three scalings, against 27% in Paik et al. 2004's validation cohort.
+# Oncotype DX is classified by cohort tertiles of the unbounded RSU instead. Kept for reference.
 ONCOTYPE_CUTOFFS = (18, 31)
 
 # PAM50 (Parker et al., 2009): nearest-centroid subtype on these 50 genes.
@@ -182,7 +186,7 @@ def get_signature_reference_text():
         f"reference genes ({', '.join(ONCOTYPE_REFERENCE_GENES)}), then rescaled to 0-{ONCOTYPE_GENE_SCALE} across the "
         f"cohort. Group scores: {oncotype_groups}. Unscaled recurrence score RSU = {rsu_terms}. Classes are cohort "
         f"tertiles of RSU. The published Recurrence Score cutoffs ({ONCOTYPE_CUTOFFS[0]} and {ONCOTYPE_CUTOFFS[1]}) are "
-        "not used because they do not transfer to RNA-seq.",
+        "not used because they require calibration against the commercial assay, which is not available for this data.",
         f"- PAM50 (Parker et al., 2009): the 50 genes ({', '.join(PAM50_GENES)}) are median-centred using a subset with "
         "equal numbers of ER-positive and ER-negative patients, then Spearman-correlated with the five Parker centroids "
         "(Basal, HER2, LumA, LumB, Normal); the subtype is the highest correlation. Risk of recurrence "

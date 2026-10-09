@@ -90,11 +90,15 @@ def calculate_oncotype_dx_score(df, scaling="minmax"):
     heatmap, survival); RS is kept as a separate column for reference only.
 
     Risk classes: cohort tertiles of the unbounded RSU, not the published RS cutoffs (Low < 18,
-    Intermediate 18 to < 31, High >= 31). Those cutoffs assume the assay's own qPCR scale. On
-    this RNA-seq data they put 67% (min-max), 54% (1st-99th percentile) or 45% (reference + 10)
-    of ER+ patients in High, against roughly 15-27% in published ER+ cohorts. RS is bounded at
-    0 and 100, which ties about a third of the cohort at RS = 100, so tertiles are taken on
-    RSU, which keeps the full ranking.
+    Intermediate 18 to < 31, High >= 31). Using those cutoffs needs gene-wise calibration
+    against commercial Recurrence Scores from the same tumours (Buus et al. 2021, npj Breast
+    Cancer 7:15); TCGA has no commercial scores, so this isn't possible. Applying the algorithm
+    without calibration overestimates RS about twofold and places most patients in a higher
+    risk group (Bartlett et al. 2020, PLoS ONE 15:e0238593). On this data the cutoffs put 67%
+    (min-max), 54% (1st-99th percentile) or 45% (reference + 10) of ER+ patients in High,
+    against 27% in Paik et al. 2004's validation cohort. RS is bounded at 0 and 100, which ties
+    about a third of the cohort at RS = 100, so tertiles are taken on RSU, which keeps the full
+    ranking.
     """
     genes = [g for gene_weights, _, _ in ONCOTYPE_GROUPS.values() for g in gene_weights] + list(ONCOTYPE_SINGLE_GENES)
     _require_genes(df, genes, "Oncotype DX")
