@@ -3,11 +3,11 @@ import json
 import argparse
 import inspect
 import pandas as pd
-from openai import OpenAI
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from run_paths import generation_path, evaluation_path, load_config
 from signature_definitions import get_signature_reference_text
+from llm_requests import SAVE_EVERY, add_workers_arg, chat, make_client, run_cli, run_in_pool, save_csv
 
 load_dotenv()
 
@@ -113,7 +113,7 @@ evaluator_instruction = inspect.cleandoc("""
 # ==========================================
 # 4. Execution Loop (LLM-as-a-Judge)
 # ==========================================
-def run_evaluation(generated_by, ablation):
+def run_evaluation(generated_by, ablation, workers=1, resume=False):
     """Judge `generated_by`'s discordant-cohort summaries (for the given ablation) with the
     judge model in config.yml, save the scored CSV and print the summary metrics."""
     model_to_use = config["evaluation"]["judge_model"]
@@ -132,21 +132,37 @@ def run_evaluation(generated_by, ablation):
         print("[WARNING] Judge model is the same as the generation model; scores may be biased toward its own style.")
 
     os.makedirs("data/evaluation_outputs", exist_ok=True)
-    print(f"Loaded configuration: Local LM Studio targeting judge model '{model_to_use}'")
+    print(f"Loaded configuration: judge model '{model_to_use}' at {eval_base_url}")
 
-    client = OpenAI(base_url=eval_base_url, api_key=eval_api_key)
+    client = make_client(eval_base_url, eval_api_key)
 
     if not os.path.exists(input_filename):
         raise FileNotFoundError(f"Could not find {input_filename}. Please run the generation script first!")
 
     df = pd.read_csv(input_filename)
+    # Only successfully scored cases are ever written, so every row in an existing file is done.
     evaluation_results = []
+    if resume and os.path.exists(output_filename):
+        evaluation_results = pd.read_csv(output_filename).to_dict("records")
+        print(f"Resuming: {len(evaluation_results)} cases already scored in {output_filename}.")
+    done_ids = {r["patient_id"] for r in evaluation_results}
 
     signature_reference = get_signature_reference_text()
 
-    print("Initiating Local LLM-as-a-Judge Evaluation Pipeline...\n")
+    print("Initiating LLM-as-a-Judge Evaluation Pipeline...\n")
 
+    pending = []
     for index, row in df.iterrows():
+        patient_id = row['patient_id']
+        if patient_id in done_ids:
+            continue
+        if pd.isna(row.get(generation_input_column)) or row.get('final_risk_class') == "Error":
+            print(f"  [SKIPPED] Missing or invalid text for {patient_id}.")
+            continue
+        pending.append(row)
+
+    def audit(row):
+        """Score one patient on a worker thread; returns the output row, raises on failure."""
         patient_id = row['patient_id']
         generated_text = row.get(generation_input_column)
         # Ablation runs log blank fields for evidence the model was not shown
@@ -155,12 +171,6 @@ def run_evaluation(generated_by, ablation):
         signature_classifications = row.get('signature_classifications') if pd.notna(row.get('signature_classifications')) else not_shown
         transcriptomic_data = row.get('transcriptomic_data') if pd.notna(row.get('transcriptomic_data')) else not_shown
         active_pathways = row.get('active_pathways') if pd.notna(row.get('active_pathways')) else not_shown
-
-        print(f"Auditing Report for Patient: {patient_id}...")
-
-        if pd.isna(generated_text) or row.get('final_risk_class') == "Error":
-            print(f"  [SKIPPED] Missing or invalid text for {patient_id}.")
-            continue
 
         prompt = inspect.cleandoc(f"""
             Please audit and score the following generated Bioinformatics summary.
@@ -182,59 +192,76 @@ def run_evaluation(generated_by, ablation):
             List the ungrounded claims first, then return justifications and integer scores (1-5) strictly matching the requested JSON schema.
         """)
 
-        try:
-            response = client.chat.completions.create(
-                model=model_to_use,
-                temperature=generation_temp,
-                messages=[
-                    {"role": "system", "content": evaluator_instruction},
-                    {"role": "user", "content": prompt},
-                ],
-                response_format={"type": "json_schema", "json_schema": grading_report_schema},
-            )
+        response = chat(
+            client,
+            model=model_to_use,
+            temperature=generation_temp,
+            messages=[
+                {"role": "system", "content": evaluator_instruction},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_schema", "json_schema": grading_report_schema},
+        )
 
-            parsed_report = GradingReport.model_validate_json(response.choices[0].message.content)
+        parsed_report = GradingReport.model_validate_json(response.choices[0].message.content)
 
-            n_grounded = len(parsed_report.grounded_claims)
-            n_ungrounded = len(parsed_report.ungrounded_claims)
-            total_claims = n_grounded + n_ungrounded
-            hallucination_rate = (n_ungrounded / total_claims * 100) if total_claims > 0 else float("nan")
-            bio_score = cap_biological_score(parsed_report.biological_synthesis_score, n_ungrounded)
+        n_grounded = len(parsed_report.grounded_claims)
+        n_ungrounded = len(parsed_report.ungrounded_claims)
+        total_claims = n_grounded + n_ungrounded
+        hallucination_rate = (n_ungrounded / total_claims * 100) if total_claims > 0 else float("nan")
+        bio_score = cap_biological_score(parsed_report.biological_synthesis_score, n_ungrounded)
 
-            evaluation_results.append({
-                'patient_id': patient_id,
-                'ablation': ablation,
-                'generation_model': generated_by,
-                'judge_model': model_to_use,
-                'clinical_data': clinical_data,
-                'signature_classifications': signature_classifications,
-                'transcriptomic_data': transcriptomic_data,
-                'active_pathways': active_pathways,
-                generation_input_column: generated_text,
-                # 'model_confidence_percent' / 'model_entropy_score' (logprobs) disabled for now
-                'grounded_claim_count': n_grounded,
-                'ungrounded_claim_count': n_ungrounded,
-                'total_claims': total_claims,
-                'hallucination_rate': hallucination_rate,
-                'ungrounded_claims': json.dumps(parsed_report.ungrounded_claims),
-                'bio_synthesis_score': bio_score,
-                'bio_synthesis_score_raw': parsed_report.biological_synthesis_score,
-                'bio_synthesis_justification': parsed_report.biological_synthesis_justification,
-                'sys_reasoning_score': parsed_report.systematic_reasoning_score,
-                'sys_reasoning_justification': parsed_report.systematic_reasoning_justification,
-                'prognostic_resolution_score': parsed_report.prognostic_resolution_score,
-                'prognostic_resolution_justification': parsed_report.prognostic_resolution_justification
-            })
-            print(f"  [SUCCESS] Scored {patient_id}")
-
-        except Exception as e:
-            print(f"  [ERROR] Evaluating patient {patient_id}: {e}")
+        return {
+            'patient_id': patient_id,
+            'ablation': ablation,
+            'generation_model': generated_by,
+            'judge_model': model_to_use,
+            'clinical_data': clinical_data,
+            'signature_classifications': signature_classifications,
+            'transcriptomic_data': transcriptomic_data,
+            'active_pathways': active_pathways,
+            generation_input_column: generated_text,
+            # 'model_confidence_percent' / 'model_entropy_score' (logprobs) disabled for now
+            'grounded_claim_count': n_grounded,
+            'ungrounded_claim_count': n_ungrounded,
+            'total_claims': total_claims,
+            'hallucination_rate': hallucination_rate,
+            'ungrounded_claims': json.dumps(parsed_report.ungrounded_claims),
+            'bio_synthesis_score': bio_score,
+            'bio_synthesis_score_raw': parsed_report.biological_synthesis_score,
+            'bio_synthesis_justification': parsed_report.biological_synthesis_justification,
+            'sys_reasoning_score': parsed_report.systematic_reasoning_score,
+            'sys_reasoning_justification': parsed_report.systematic_reasoning_justification,
+            'prognostic_resolution_score': parsed_report.prognostic_resolution_score,
+            'prognostic_resolution_justification': parsed_report.prognostic_resolution_justification
+        }
 
     # ==========================================
     # 5. Save Structured Audit Outputs
     # ==========================================
-    final_df = pd.DataFrame(evaluation_results)
-    final_df.to_csv(output_filename, index=False)
+    # Only this (main) thread writes: the whole CSV in input order, every SAVE_EVERY cases and on exit.
+    order = {p_id: k for k, p_id in enumerate(df["patient_id"])}
+    def results_df():
+        return pd.DataFrame(sorted(evaluation_results, key=lambda r: order.get(r["patient_id"], len(order))))
+
+    n_done = 0
+    finished = False
+    try:
+        for row, record, error in run_in_pool(pending, audit, workers):
+            n_done += 1
+            if error is not None:
+                print(f"[{n_done}/{len(pending)}] [ERROR] Evaluating patient {row['patient_id']}: {error}")
+                continue
+            evaluation_results.append(record)
+            print(f"[{n_done}/{len(pending)}] [SUCCESS] Scored {row['patient_id']}")
+            if n_done % SAVE_EVERY == 0:
+                save_csv(results_df(), output_filename)
+        finished = True
+    finally:
+        if finished or evaluation_results:
+            save_csv(results_df(), output_filename)
+
+    final_df = results_df()
     print(f"\nStructural evaluation complete. Results stored successfully in: {output_filename}")
 
     if not final_df.empty:
@@ -265,10 +292,17 @@ def run_evaluation(generated_by, ablation):
     return final_df
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser(description="Judge generated summaries with the judge model in config.yml.")
     parser.add_argument("--model", default=None, help="GENERATION model whose outputs to judge (default: config pipeline.model_name).")
     parser.add_argument("--ablation", default="full", help="Which generation ablation run to judge.")
+    parser.add_argument("--resume", action="store_true",
+                        help="Continue an interrupted run: keep the cases already scored, judge the rest.")
+    add_workers_arg(parser, config)
     args = parser.parse_args()
     generated_by = args.model or config["pipeline"]["model_name"]
-    run_evaluation(generated_by, args.ablation)
+    run_evaluation(generated_by, args.ablation, workers=args.workers, resume=args.resume)
+
+
+if __name__ == "__main__":
+    run_cli(main)

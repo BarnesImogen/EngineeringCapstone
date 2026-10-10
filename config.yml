@@ -10,16 +10,16 @@
 # Keep the judge model DIFFERENT from the generation model to avoid self-preference bias.
 
 pipeline:
-  model_name: "local-model"
-  base_url: "http://127.0.0.1:1234/v1"
-  api_key: "lmstudio"
+  model_name: "z-ai/glm-5.3-flash"
+  base_url: "https://openrouter.ai/api/v1"
+  api_key: "set-in-env"
   temperature: 0.1
 
 evaluation:
-  judge_model: "local-judge-model"
+  judge_model: "openai/gpt-oss-20b"
   judge_temperature: 0.0
-  base_url: "http://127.0.0.1:1234/v1"
-  api_key: "lmstudio"
+  base_url: "https://openrouter.ai/api/v1"
+  api_key: "set-in-env"
   # Minimum agreement with the unanimous consensus on concordant cases for a model to pass the sanity check
   min_concordant_agreement: 0.8
   # A summary passes a metric when its score is >= this threshold
@@ -29,3 +29,8 @@ evaluation:
     - "biological_synthesis"
     - "systematic_reasoning"
     - "prognostic_resolution"
+
+# Optional. Default for --workers (max concurrent API requests) in generation_pipeline.py,
+# evaluation_pipeline.py and semantic_entropy.py. Omit to use 8; --workers on the command line wins.
+concurrency:
+  workers: 8

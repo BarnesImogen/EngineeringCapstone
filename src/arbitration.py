@@ -22,6 +22,8 @@ SYSTEM_INSTRUCTION = inspect.cleandoc("""
     Describe how a named signature (e.g. Oncotype DX, PAM50, BCI) weights biomarkers only as stated in the
     Signature Definitions; do not invent other weights or gene memberships.
     If a section of evidence is not provided, do not make claims that would require it.
+    Refer to the patient neutrally as "the patient". Do not state the patient's sex, receptor status (ER, PR, HER2)
+    or molecular subtype unless it appears in the provided context.
     Do not recommend medical treatments or clinical therapies; focus strictly on prognostic risk classification.
 """)
 
